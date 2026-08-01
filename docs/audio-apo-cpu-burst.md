@@ -162,6 +162,36 @@ lightly loaded machine and severe on this one. It also gives a cheap mitigation
 that does not involve touching audio settings at all — fewer background
 processes.
 
+## Prior art — what was already known, and what is new here
+
+`iGoSwServer.exe` is already a known-problematic process. It appears in
+crash-and-freeze reports, and general "what is this process" pages describe it
+as Intelligo's audio enhancement service shipped preinstalled by OEMs.
+
+Most on-point is a Dell Alienware m16 R1 thread reporting *"intermittent
+stuttering during any task"* — the same symptom shape as this machine. In it,
+one user notes `iGoSwServer.exe` appearing in reliability logs. But it is
+**mentioned, not established**: the thread contains no CPU measurements, no
+stacks, and no mechanism, the discussion moves on to fTPM, Dell SupportAssist
+and a failing chipset fan, and it remains marked unsolved.
+
+The advice that circulates is to uninstall Intelligo Audio Enhancement or
+disable the Intelligo Audio Service in Device Manager. That is a workaround
+aimed at a process, not an explanation.
+
+**What is new here** is the mechanism and its cost model:
+
+- the trigger is *any* audio session, not a specific application;
+- the burning thread is in `Process32NextW`, polling the whole process list
+  ~60 times a second for ~18 seconds;
+- the cost is therefore linear in the number of running processes, which is why
+  the same defect is mild on some machines and severe on others;
+- and it happens with both ASUS AI audio features switched **off**, so it is not
+  the enhancement doing work.
+
+Not found anywhere: a report tying the CPU burn to process enumeration, or to
+audio events as the trigger.
+
 ## Open questions
 
 1. Does it scale with sound length, or is ~20 seconds fixed regardless? The

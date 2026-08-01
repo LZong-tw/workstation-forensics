@@ -203,6 +203,28 @@ average is 437.5 — *above* the degraded 419. No discriminating power.
 `gdi_objects` / `user_objects` are likewise useless here: constant at 5 and 6,
 because DWM uses DirectComposition/D3D rather than GDI.
 
+## Prior art — thin, and generic
+
+Searching for DWM high CPU returns a large volume of near-identical
+troubleshooting articles. They converge on the same list: update the GPU
+driver, disable overlays (Game Bar, Discord, RGB tools), reduce visual effects,
+run `sfc` / `DISM`, restart. The framing throughout is that DWM is a victim of
+something external rather than degrading on its own.
+
+None of it addresses the shape of the problem described here:
+
+- nothing about degradation that accumulates over **days of uptime**;
+- no composition pass-rate or frame-interval measurements;
+- no stacks, and no mention of `CleanTrees` or any other specific function.
+
+"Restarting dwm.exe fixes it" is folk knowledge and easy to find. *Why* it comes
+back, and what is growing in the meantime, is not documented anywhere found.
+
+This is a weak basis for claiming novelty, and it is stated that way on
+purpose: an absence of search results is not evidence that Microsoft is
+unaware, only that no public write-up was located. This section should be
+revisited before any bug report is filed.
+
 ## Open questions
 
 1. Does a second degraded capture reproduce `CleanTrees`? — waiting on the trap.
