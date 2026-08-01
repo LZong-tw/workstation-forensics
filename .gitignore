@@ -8,6 +8,8 @@
 
 evidence/
 captures/
+slow-capture/
+dwm-capture/
 *.dmp
 *.etl
 *.wer

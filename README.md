@@ -128,6 +128,78 @@ Hardcoded `C:\Users\LZong` paths throughout are expected until then.
 
 ---
 
+## Part 3 — Slow-moment hotkey
+
+For slowness that is intermittent and has no single suspect: press a key while
+it is happening and the machine's state at that instant is recorded.
+
+```powershell
+# Elevated, once.
+.\setup-slow-hotkey.ps1                       # default CTRL+ALT+S
+.\setup-slow-hotkey.ps1 -Hotkey 'CTRL+ALT+Q'
+```
+
+Two short beeps mean the hotkey fired, one long beep means the capture is
+done (~15 s). Output lands in `slow-capture\<timestamp>\summary.txt`, indexed
+on the Desktop in `slow-captures.txt`.
+
+Records CPU delta / private / working set / handles / threads per process,
+per-core frequency, memory and paging counters, GPU engine use, per-process
+I/O, DWM composition rate, and recent error events.
+
+### Why a hotkey here, when the DWM watcher had to be fully automatic
+
+The DWM trap could not use a human trigger, because the human's reaction —
+restarting `dwm.exe` — destroys the evidence before anyone can look at it.
+
+Nothing is destroyed by noticing the machine is slow. So the human is a valid
+trigger here, and pressing a key beats guessing a threshold for a symptom as
+multi-causal as "slow".
+
+### Speed is the design constraint
+
+A slow episode can be brief, and a capture that takes a minute records the
+recovery rather than the problem. The first version took 30.5 s. Two changes
+brought it to ~14.7 s:
+
+- **One `Get-Counter` call instead of four.** Measured: four separate calls
+  8.32 s, the same counters combined 4.26 s. Each call pays its own PDH
+  initialisation. (`\GPU Engine(*)` alone accounts for ~3 s of what remains.)
+- **No dedicated sleep for the CPU delta.** The first process snapshot opens
+  the window, the counter work happens, the second snapshot closes it — so the
+  delta is measured across work that had to happen anyway. Elapsed time is read
+  from a stopwatch rather than assumed, because it varies.
+
+### Known limitation
+
+Explorer is what registers `.lnk` hotkeys, so if Explorer itself is hung the
+key may not fire — and that is one of the cases you most want to capture. The
+fallback does not depend on it:
+
+```powershell
+schtasks /run /tn "Slow Moment Capture"
+```
+
+### Not included: a ring buffer
+
+A hotkey can only record from the moment it is pressed. Capturing what led up
+to it needs a continuously running ETW session flushed on demand — WPR records
+to memory by default (`-filemode` is what selects file mode), so the mechanism
+exists.
+
+It is deliberately not wired up. WPR needs `SeSystemProfilePrivilege`, so the
+session would have to run permanently and elevated, and its cost on this
+machine has not been measured — an attempt to A/B it failed because WPR would
+not start unelevated, and background CPU here swings 15–82% at 5-second
+granularity, which is far too noisy to resolve the difference over a short run.
+Buffer capacity is set inside the profile `.wprp`, not from the command line;
+for a light CPU profile the order of magnitude is roughly a minute per 256 MB,
+but that is an estimate, not a measurement.
+
+Measure it first, then decide whether the standing cost is worth the history.
+
+---
+
 ## Notes
 
 Everything here is read-only with respect to system state. Nothing changes dump
