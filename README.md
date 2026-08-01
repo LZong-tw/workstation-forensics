@@ -112,19 +112,26 @@ from a single degraded observation plus a single healthy control. The trap that
 would produce a second degraded sample is armed and has not yet fired. Read the
 document's confidence markers before relying on anything in it.
 
-### Repo copy is a snapshot
+### The running instrument is a separate copy
 
-The watcher scripts are running live from `C:\Users\LZong\Scripts` on this
-machine, driven by a scheduled task. The copies here are a **snapshot**, not the
-running instrument.
+On the machine the investigation is running on, these scripts are driven by a
+scheduled task from a different directory, and **that copy is deliberately left
+alone** while the investigation is open. Repointing a task that is mid-run risks
+a gap in sampling, and the point of the trap is to be there when degradation
+happens.
 
-They are deliberately not unified yet, and not parameterized. Repointing the
-scheduled task mid-investigation risks losing sampling continuity, and
-generalizing hardcoded paths would produce code that is never executed — that
-is, untested. Both happen at close-out, when the scripts can be re-run and
-verified.
+The copies here are the generalized ones: paths default off `$PSScriptRoot`, so
+they work wherever they are installed, including from the original location.
+They are verified independently rather than assumed —
+`watch/dwm-growth-sample.ps1` was run against a scratch `-DataDir` and produced
+a well-formed 22-column row without touching the live data set.
 
-Hardcoded `C:\Users\LZong` paths throughout are expected until then.
+One caveat, stated rather than glossed: that verification ran **unelevated**, so
+`hot_pct`, `ms_per_pass_hot` and the GDI/USER columns came back empty. Those
+paths need elevation by design (dwm runs as `DWM-1`, and `GetGuiResources` needs
+a privileged handle). The logic is carried over line-for-line from the copy that
+does run elevated and does populate them, but the elevated path has not been
+re-run against this version.
 
 ---
 

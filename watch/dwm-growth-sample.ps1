@@ -1,12 +1,35 @@
-﻿# 一次取樣 dwm 合成器的劣化指標，附加一列到 CSV 後結束。
-# 設計成 one-shot：沒有常駐進程會死掉或洩漏，每次執行獨立，重開機也不影響。
+# Take one sample of dwm's degradation indicators, append a row to CSV, exit.
 #
-# 關鍵衍生欄位 ms_per_pass = 每次合成 pass 花掉的 CPU 毫秒數。
-# 2026-07-31 16:00 重啟 dwm 後的乾淨基準約 2 ms；劣化 13 天後量到約 9 ms。
+# Deliberately one-shot: there is no resident process to die or leak, each run
+# is independent, and a reboot changes nothing.
+#
+# The derived column that matters is ms_per_pass -- CPU milliseconds spent per
+# composition pass. On the reference machine a freshly restarted dwm sits near
+# 2 ms; after 13 days of uptime it measured about 9 ms.
+#
+# Source is pure ASCII on purpose: PowerShell 5.1 reads BOM-less UTF-8 as ANSI,
+# which turns non-ASCII comments into cascading parser errors.
+
+param(
+  # Everything this script reads or writes lives here. Defaults beside the
+  # script so it works wherever it is installed.
+  [string]$DataDir = $PSScriptRoot,
+
+  # Signal 1: CPU milliseconds per composition pass on the hottest thread.
+  # Clean spread on the reference machine was 0.10-2.77 over 54 samples and the
+  # degraded reading was 8.7. This sits 1.4x above the noise ceiling and below
+  # half the degraded value.
+  [double]$ThresholdCost = 4.0,
+
+  # Signal 2: handle count. Of the three candidates this was the most
+  # monotonic -- it fell between adjacent samples only 20% of the time, total
+  # range 1.10x. Degraded reading was 2532.
+  [int]$ThresholdHandles = 2400
+)
 
 $ErrorActionPreference = 'Continue'
-$csv = 'C:\Users\LZong\Scripts\dwm-growth.csv'
-$err = 'C:\Users\LZong\Scripts\dwm-growth-error.txt'
+$csv = Join-Path $DataDir 'dwm-growth.csv'
+$err = Join-Path $DataDir 'dwm-growth-error.txt'
 
 try {
 
@@ -18,9 +41,11 @@ public static class G {
   [DllImport("kernel32.dll", SetLastError=true)] static extern IntPtr OpenProcess(uint a, bool i, int p);
   [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
 
-  // GDI / USER 物件數 —— 直接的「保留中 UI 資源」計數，比 private bytes 乾淨得多
-  // （private bytes 在健康的 dwm 上自己就會盪 4 倍，沒有鑑別力）。
-  // 需要提權；排程工作是 RunLevel Highest 所以讀得到，未提權時回 [0,0]。
+  // GDI / USER object counts -- a direct count of retained UI resources, much
+  // cleaner than private bytes (which swing 4x on a healthy dwm all by
+  // themselves and have no discriminating power).
+  // Needs elevation; the scheduled task runs at RunLevel Highest so it reads
+  // fine there, and returns [0,0] unelevated.
   public static uint[] Gui(int pid){
     IntPtr h = OpenProcess(0x1000, false, pid);              // QUERY_LIMITED_INFORMATION
     if(h == IntPtr.Zero) h = OpenProcess(0x0400, false, pid); // QUERY_INFORMATION
@@ -33,7 +58,9 @@ public static class G {
   [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
   delegate bool E(IntPtr h, IntPtr l);
 
-  // 回傳 [pass/s, p50ms, p90ms]
+  // Returns [passes/sec, p50 ms, p90 ms].
+  // DwmFlush blocks until the next composition pass and does NOT create
+  // composition work, so timing its returns measures the pass rate for free.
   public static double[] Rate(int n){
     var iv=new double[n]; DwmFlush(); var sw=Stopwatch.StartNew(); double prev=0;
     for(int i=0;i<n;i++){ DwmFlush(); double now=sw.Elapsed.TotalMilliseconds; iv[i]=now-prev; prev=now; }
@@ -49,15 +76,16 @@ public static class G {
 '@
 
 $d = Get-CimInstance Win32_Process -Filter "Name='dwm.exe'" | Select-Object -First 1
-if(-not $d){ throw 'dwm.exe 不存在' }
+if(-not $d){ throw 'dwm.exe not found' }
 $dwmPid = [int]$d.ProcessId
 
 function CpuSec { $q = Get-CimInstance Win32_Process -Filter "ProcessId=$dwmPid" -EA SilentlyContinue
                   if($q){ ([double]$q.KernelModeTime + [double]$q.UserModeTime)/1e7 } else { $null } }
 
-# 每條執行緒的 CPU 累計秒數。用 .NET 而不是
-# Win32_PerfFormattedData_PerfProc_Thread —— 後者會透過 WMI 枚舉全系統的執行緒
-# （-Filter 是事後才套用），實測一次要 15.2 核心秒；這個版本 0.6 秒且牆鐘 0.0 秒。
+# Per-thread cumulative CPU seconds, via .NET rather than
+# Win32_PerfFormattedData_PerfProc_Thread. That WMI class enumerates every
+# thread on the system and applies -Filter afterwards; it measured 15.2 core
+# seconds per call. This version costs 0.6 core seconds and 0.0 s wall clock.
 function ThreadCpu {
   $h = @{}
   try {
@@ -68,18 +96,20 @@ function ThreadCpu {
   $h
 }
 
-# --- CPU 速率：先取 10 秒的安靜區間，再單獨量 pass rate ---
+# --- CPU rate: a quiet 10 s interval first, then measure pass rate separately -
 $c0 = CpuSec; $th0 = ThreadCpu; $t0 = Get-Date
 Start-Sleep -Seconds 10
-$r  = try { [G]::Rate(120) } catch { @(0,0,0) }     # ~1 秒的 DwmFlush 叢發
+$r  = try { [G]::Rate(120) } catch { @(0,0,0) }     # ~1 s burst of DwmFlush
 $c1 = CpuSec; $th1 = ThreadCpu; $t1 = Get-Date
 $el = ($t1-$t0).TotalSeconds
 $cpuPct = if($c0 -ne $null -and $c1 -ne $null -and $el -gt 0){ ($c1-$c0)/$el*100 } else { $null }
 
-# --- 最熱的 thread（合成執行緒；dwm 重啟後 TID 會變，所以取最大值而不是寫死）---
+# --- hottest thread (the compositor thread; its TID changes when dwm restarts,
+#     so pick the maximum rather than hardcoding one) -------------------------
 $hotTid = ''; $hotPct = ''
 if($th1.Count -gt 0 -and $el -gt 0){
-  # 注意：別用 $d 當迴圈變數 —— 外層的 $d 是 dwm 的 CIM 物件，蓋掉會讓 $d.CreationDate 變 null
+  # Do not use $d as the loop variable -- the outer $d is dwm's CIM object, and
+  # shadowing it makes $d.CreationDate null further down.
   $best = $null
   foreach($id in $th1.Keys){
     if($th0.ContainsKey($id)){
@@ -90,7 +120,7 @@ if($th1.Count -gt 0 -and $el -gt 0){
   if($best){ $hotTid = $best.id; $hotPct = [math]::Round($best.delta/$el*100,1) }
 }
 
-# --- GPU：用萬用字元查詢，避開昂貴的 -ListSet 列舉 ---
+# --- GPU: wildcard query, avoiding the expensive -ListSet enumeration --------
 $gpuMem = ''; $gpuPct = ''
 try {
   $gpuMem = [math]::Round(((Get-Counter '\GPU Process Memory(*)\Local Usage' -EA Stop).CounterSamples |
@@ -103,25 +133,30 @@ try {
               Measure-Object CookedValue -Sum).Sum, 3)
 } catch { }
 
-# --- 場景複雜度的粗略代理指標 ---
+# --- crude proxy for scene complexity ---------------------------------------
 $w = try { [G]::Windows() } catch { @(0,0) }
 
-# --- CRD 是否正在擷取桌面 ---
+# --- is a remote-desktop tool capturing the screen right now -----------------
 $crd = [int][bool](Get-CimInstance Win32_Process -Filter "Name='remoting_desktop.exe'" -EA SilentlyContinue)
 
 $osUp   = ((Get-Date) - (Get-CimInstance Win32_OperatingSystem).LastBootUpTime).TotalHours
 $dwmUp  = ((Get-Date) - $d.CreationDate).TotalHours
 $passPs = $r[0]
 
-# 每次 pass 的 CPU 毫秒數 —— 這就是要追的那個數字
+# CPU milliseconds per composition pass -- the number this whole script exists
+# to track.
 $msPass    = if($cpuPct -and $passPs -gt 0){ [math]::Round($cpuPct/100*1000/$passPs, 3) } else { '' }
 $msPassHot = if($hotPct -ne '' -and $passPs -gt 0){ [math]::Round([double]$hotPct/100*1000/$passPs, 3) } else { '' }
 
 $gui = try { [G]::Gui($dwmPid) } catch { @(0,0) }
 
-# 新欄位一律加在最後 —— 舊資料列只有 20 欄，靠位置索引前 20 欄的讀法不會壞。
-# top_windows / vis_windows 量的是全系統視窗數（= 使用者開了哪些 app），
-# 與 dwm 內部狀態無關，已證實無鑑別力，保留只為不破壞既有欄位順序。
+# New columns always go on the end, so existing rows (which have only 20) stay
+# readable by positional index.
+#
+# top_windows / vis_windows count windows system-wide -- effectively "which
+# apps are open" -- and have nothing to do with dwm's internal state. They were
+# measured to have no discriminating power (healthy average 437.5 sits ABOVE
+# the degraded 419) and are kept only so column order does not shift.
 $head = 'time,dwm_pid,dwm_up_h,os_up_h,cpu_pct,hot_tid,hot_pct,pass_per_s,p50_ms,p90_ms,ms_per_pass,ms_per_pass_hot,private_mb,gpu_local_mb,gpu_pct,handles,threads,top_windows,vis_windows,crd_capturing,gdi_objects,user_objects'
 if(-not (Test-Path $csv)){ $head | Out-File $csv -Encoding utf8 }
 
@@ -138,28 +173,30 @@ if(-not (Test-Path $csv)){ $head | Out-File $csv -Encoding utf8 }
 ) | Out-File $csv -Encoding utf8 -Append
 
 # ---------------------------------------------------------------------------
-# 劣化陷阱。實際情況不會是「使用者看到曲線」，而是「發現變慢，順手重啟 dwm，證據又沒了」，
-# 所以要在他察覺之前自己抓好。
+# The degradation trap.
 #
-# 【為什麼是兩個獨立訊號】
-# 原本只看 ms_per_pass_hot。但 24 小時的資料顯示成本沒動、保留資源卻在漲 ——
-# 如果這次劣化長在別的地方，單一訊號的陷阱永遠不會觸發，等於白架。
-# 所以改成兩個各自獨立、各自有 flag 的觸發條件，一個誤觸不會吃掉另一個的機會。
+# What actually happens is not "the user watches a graph". It is "the machine
+# feels slow, they restart dwm, and the evidence is gone". So the capture has
+# to fire before they react.
 #
-# 訊號 1  ms_per_pass_hot > 4.0
-#         乾淨散佈 0.10–2.77（54 筆），爛掉時 8.7。高於雜訊上緣 1.4 倍、低於劣化值一半。
-# 訊號 2  handles > 2400
-#         handles 是三個候選裡最單調的（相鄰下降僅 20%、全距 1.10x）。
-#         爛掉時 2532，目前上限 1791。
-#         ※ private_mb 刻意不當觸發訊號：健康狀態自己就盪 256–1092（4.27x、下降 33%），
-#           而且已經超過「爛掉時」的 795 —— 沒有鑑別力，拿它觸發只會浪費採證機會。
+# Why two independent signals:
 #
-# 兩者都要求連續兩次超標，擋掉瞬間尖峰。
+# The first version watched ms_per_pass_hot alone. Twenty-four hours of data
+# then showed cost flat while retained resources climbed -- so if the next
+# degradation grows somewhere else, a single-signal trap never fires and the
+# whole instrument is wasted. Each signal now has its own flag file, so one
+# firing does not consume the other's chance.
+#
+# private_mb is deliberately NOT a signal. It looks like a memory leak and
+# behaves like noise: 256-1092 MB on a healthy process (4.27x, falling between
+# adjacent samples 33% of the time) and it has already exceeded the 795 MB seen
+# while degraded. Triggering on it would only waste capture opportunities.
+#
+# Both signals require two consecutive samples over threshold, so a transient
+# spike cannot fire them.
 # ---------------------------------------------------------------------------
-$TH_COST    = 4.0
-$TH_HANDLES = 2400
 
-# 前一列（同一個 dwm PID）拿來做「連續兩次」判定
+# The previous row, for the same dwm PID, provides the "two consecutive" test.
 $prevRow = $null
 $allRows = @(Get-Content $csv | Select-Object -Skip 1)
 if($allRows.Count -ge 2){
@@ -168,26 +205,26 @@ if($allRows.Count -ge 2){
 }
 
 function Fire($tag, $reason){
-  $flag = "C:\Users\LZong\Scripts\dwm-captured-$dwmPid-$tag.flag"
+  $flag = Join-Path $DataDir "dwm-captured-$dwmPid-$tag.flag"
   if(Test-Path $flag){ return }
   New-Item -ItemType File -Path $flag -Force | Out-Null
   "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')  [$tag] $reason" |
-    Out-File 'C:\Users\LZong\Scripts\dwm-growth-trigger.log' -Encoding utf8 -Append
+    Out-File (Join-Path $DataDir 'dwm-growth-trigger.log') -Encoding utf8 -Append
   & 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' -NoProfile -ExecutionPolicy Bypass `
-    -File 'C:\Users\LZong\Scripts\dwm-autocapture.ps1' -Reason "[$tag] $reason"
+    -File (Join-Path $PSScriptRoot 'dwm-autocapture.ps1') -Reason "[$tag] $reason"
 }
 
-# 訊號 1：每次合成 pass 的 CPU 成本
-if($msPassHot -ne '' -and [double]$msPassHot -gt $TH_COST -and $prevRow -and $prevRow[11]){
-  if([double]$prevRow[11] -gt $TH_COST){
-    Fire 'cost' "ms_per_pass_hot=$msPassHot 前次=$($prevRow[11])（門檻 $TH_COST，爛掉時 8.7）"
+# Signal 1: CPU cost per composition pass
+if($msPassHot -ne '' -and [double]$msPassHot -gt $ThresholdCost -and $prevRow -and $prevRow[11]){
+  if([double]$prevRow[11] -gt $ThresholdCost){
+    Fire 'cost' "ms_per_pass_hot=$msPassHot prev=$($prevRow[11]) (threshold $ThresholdCost, degraded reference 8.7)"
   }
 }
 
-# 訊號 2：保留中的核心物件
-if([int]$d.HandleCount -gt $TH_HANDLES -and $prevRow -and $prevRow[15]){
-  if([int]$prevRow[15] -gt $TH_HANDLES){
-    Fire 'handles' "handles=$($d.HandleCount) 前次=$($prevRow[15])（門檻 $TH_HANDLES，爛掉時 2532）"
+# Signal 2: retained kernel objects
+if([int]$d.HandleCount -gt $ThresholdHandles -and $prevRow -and $prevRow[15]){
+  if([int]$prevRow[15] -gt $ThresholdHandles){
+    Fire 'handles' "handles=$($d.HandleCount) prev=$($prevRow[15]) (threshold $ThresholdHandles, degraded reference 2532)"
   }
 }
 
