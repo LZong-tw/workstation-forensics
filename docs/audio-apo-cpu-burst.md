@@ -104,6 +104,64 @@ Burst 'SystemSounds.Asterisk' { [System.Media.SystemSounds]::Asterisk.Play() }
 Let it settle back to 0% between runs, or the tail of one contaminates the
 next — the same mistake, one level down.
 
+## Root cause [MEASURED]
+
+The burning thread is not doing audio work. It is enumerating the process list
+in a loop.
+
+Stack from a full-memory dump taken 2.5 s into a burst, symbolized with
+`cdb -z` (the process runs as the logged-in user, so no elevation and no live
+attach were needed):
+
+```
+1  Id: 171c.3748          <- tid 14152, the thread measured at 89.5%
+  kernel32!Process32NextW+0x80
+  iGoSwServer+0x7d9f6
+  iGoSwServer+0x80c19
+  iGoSwServer+0x7dcc8
+  iGoSwServer+0x6cbd2
+  ucrtbase!thread_start<...>
+  kernel32!BaseThreadInitThunk+0x17
+  ntdll!RtlUserThreadStart+0x2c
+```
+
+`Process32NextW` is Toolhelp32 process enumeration. The `--server=session_monitor`
+thread appears to poll the full process list to work out which application
+started playing audio, rather than subscribing to an audio session
+notification.
+
+The arithmetic closes:
+
+```
+processes running                     502
+one Toolhelp32 snapshot            15.42 ms   (measured, 196 iterations)
+burst cost                          16.9 core-seconds
+  -> enumerations per burst        ~1,096
+  -> over the ~18 s burst             ~61 per second
+  -> 61 x 15.42 ms                    94% of one core
+measured                             85-90% of one core
+```
+
+This also explains the two things that did not fit:
+
+- **89% kernel / 11% user time.** Process enumeration is a kernel operation.
+  Real DSP would be user-mode SIMD math.
+- **Turning ASUS AI noise cancelling off changes nothing.** Both "AI 降噪麥克風"
+  and "AI ClearVoice - 喇叭" were already disabled on this machine throughout
+  every measurement above. The polling is unconditional; it is not the feature
+  doing work.
+
+### The cost scales with how many processes you run
+
+15.42 ms per snapshot is a function of having 502 processes. The relationship is
+linear, so a machine with ~100 processes would pay roughly a fifth of this —
+about 18% of a core instead of 94%.
+
+That makes the severity here partly self-inflicted: the same defect is mild on a
+lightly loaded machine and severe on this one. It also gives a cheap mitigation
+that does not involve touching audio settings at all — fewer background
+processes.
+
 ## Open questions
 
 1. Does it scale with sound length, or is ~20 seconds fixed regardless? The
@@ -113,8 +171,13 @@ next — the same mistake, one level down.
    one launched with `--apo --server=session_monitor` burns CPU. Why two?
 3. Is this specific to this Intelligo version, this ASUS model, or the APO
    framework generally? One machine, one version. Untested elsewhere.
-4. Does disabling the ASUS AI noise-cancelling feature stop it? Not tested —
-   that changes a user-facing setting and is the user's call, not a diagnostic
-   step.
+4. ~~Does disabling the ASUS AI noise-cancelling feature stop it?~~
+   **Answered: no.** Both AI features were already off for every measurement
+   here. This was originally suggested as a mitigation; that suggestion was
+   wrong, and the fact that it does not help is what pointed at an
+   unconditional polling loop rather than feature work.
 5. Already reported upstream? **Not searched yet.** Same prerequisite as the
    DWM finding: check before treating it as novel.
+6. Why poll at all? Windows provides audio session notifications
+   (`IAudioSessionNotification`). Whether the polling is a fallback path or the
+   only implementation is not known from a single stack.
