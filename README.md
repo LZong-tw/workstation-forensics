@@ -74,7 +74,36 @@ rights. Not yet done.
 
 ---
 
+## Part 1b — Defender scan cost
+
+```powershell
+# Elevated. Records 120 s, then reports what real-time protection spent it on.
+.\defender-perf.ps1 -Seconds 120
+```
+
+Wraps `New-MpPerformanceRecording` / `Get-MpPerformanceReport` and prints the
+top files, extensions, processes, and individual scans by time. Records only —
+it changes no Defender setting and disables no protection.
+
+Worth knowing when reading its output: scan `TotalDuration` is elapsed time per
+scan, scans overlap, and memory/AMSI scans are not attributed to any file. The
+per-file numbers therefore do **not** sum to the process's CPU time, and should
+not be presented as if they do.
+
+---
+
 ## Part 2 — Continuous watcher (investigation open)
+
+```
+watch/
+  dwm-growth-sample.ps1        one-shot sampler, 22 columns to CSV
+  dwm-autocapture.ps1          full dump + symbolized stacks + 30 s ETL
+  dwm-setup-elevated-task.ps1  registers the scheduled task at RunLevel Highest
+```
+
+Setup is one elevated run of `dwm-setup-elevated-task.ps1`. Because the task
+runs at `RunLevel Highest`, it never raises a UAC prompt afterwards — capture
+works with the screen off or over a remote session.
 
 See [`docs/dwm-investigation.md`](docs/dwm-investigation.md).
 
@@ -101,10 +130,17 @@ Hardcoded `C:\Users\LZong` paths throughout are expected until then.
 
 ## Notes
 
-Both halves are read-only with respect to system state. Nothing here changes
-dump settings, restarts services, rebuilds the search index, or edits registry
-keys. The watcher writes dumps and traces of a target process; it never
-terminates or modifies one.
+Everything here is read-only with respect to system state. Nothing changes dump
+settings, restarts services, rebuilds the search index, or edits registry keys.
+The watcher writes dumps and traces of a target process; it never terminates or
+modifies one.
+
+That rule decides what does *not* live here. A working
+`add-claude-exclusion.ps1` (adds a path to the Defender exclusion list) was
+written alongside `defender-perf.ps1` during the same investigation and is
+deliberately **not** in this repo: it mutates a security setting, so shipping it
+next to tools that promise read-only behaviour would make the promise
+meaningless. Remediation scripts belong somewhere else.
 
 `evidence/` and watcher output are git-ignored — they contain hostnames, BIOS
 identifiers, installed-software inventories, crash reports, and full process
