@@ -22,7 +22,8 @@
 # ANSI, which turns non-ASCII comments into parser errors.
 
 param(
-  [string]$OutRoot = 'C:\Users\LZong\Scripts\slow-capture',
+  # Defaults to a folder beside the script, so it works wherever it is installed.
+  [string]$OutRoot = (Join-Path $PSScriptRoot 'slow-capture'),
   [string]$Reason  = 'hotkey',
   [switch]$Silent          # suppress the completion beep entirely
 )

@@ -1,78 +1,96 @@
-﻿# 找出 Windows Defender 即時保護的 CPU 花在哪裡。必須在【系統管理員】視窗執行。
+# Find out where Windows Defender real-time protection is spending CPU.
+# MUST be run from an elevated (Administrator) window.
 #
-# 錄 120 秒，然後產出「哪些檔案 / 副檔名 / 進程 / 掃描路徑」最耗時的排行。
-# 只是錄製，不改任何設定、不關保護。
+# Records for a fixed window, then reports which files, extensions, processes
+# and individual scans cost the most time.
 #
-# 用法:  powershell -ExecutionPolicy Bypass -File C:\Users\LZong\Scripts\defender-perf.ps1
+# Recording only. Changes no Defender setting and disables no protection.
+#
+# Usage:  powershell -ExecutionPolicy Bypass -File defender-perf.ps1
+#
+# Reading the output: scan TotalDuration is elapsed time per scan, scans
+# overlap each other, and memory/AMSI scans are not attributed to any file. The
+# per-file numbers therefore do NOT sum to the process's CPU time and must not
+# be presented as if they do.
 
-param([int]$Seconds = 120)
+param(
+  [int]$Seconds   = 120,
+  [string]$OutDir = (Join-Path $PSScriptRoot 'defender-perf')
+)
 
 $ErrorActionPreference = 'Continue'
-$dir  = 'C:\Users\LZong\Scripts\defender-perf'
-$etl  = "$dir\defender.etl"
-$out  = "$dir\report.txt"
-New-Item -ItemType Directory -Path $dir -Force | Out-Null
+$etl = Join-Path $OutDir 'defender.etl'
+$out = Join-Path $OutDir 'report.txt'
+New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
 
 $elevated = (New-Object Security.Principal.WindowsPrincipal(
               [Security.Principal.WindowsIdentity]::GetCurrent())
             ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-if(-not $elevated){ Write-Host '❌ 要在系統管理員視窗執行。' -ForegroundColor Red; exit 1 }
+if (-not $elevated) { Write-Host 'X  Run this from an Administrator window.' -ForegroundColor Red; exit 1 }
 
 $log = New-Object System.Collections.Generic.List[string]
-function L($m){ $log.Add([string]$m); Write-Host $m; ($log -join "`r`n") | Out-File $out -Encoding utf8 }
+function L($m) { $log.Add([string]$m); Write-Host $m; ($log -join "`r`n") | Out-File $out -Encoding utf8 }
 
-L "=== 目前狀態 ==="
-$p = Get-CimInstance Win32_Process -Filter "Name='MsMpEng.exe'"
-$cpu0 = ([double]$p.KernelModeTime + [double]$p.UserModeTime)/1e7
-L "  MsMpEng 已跑 $([math]::Round(((Get-Date)-$p.CreationDate).TotalDays,2)) 天   CPU 累計 $([math]::Round($cpu0/3600,2)) 小時   整段平均 $([math]::Round($cpu0/((Get-Date)-$p.CreationDate).TotalSeconds*100,1))%"
+L '=== Current state ==='
+$p    = Get-CimInstance Win32_Process -Filter "Name='MsMpEng.exe'"
+$cpu0 = ([double]$p.KernelModeTime + [double]$p.UserModeTime) / 1e7
+$age  = ((Get-Date) - $p.CreationDate)
+L ("  MsMpEng up {0:N2} days   CPU {1:N2} h   lifetime average {2:N1}% of one core" -f `
+    $age.TotalDays, ($cpu0/3600), ($cpu0/$age.TotalSeconds*100))
 
+# Exclusions are invisible without elevation, which is why they are printed
+# here rather than left for the reader to look up.
 $pref = Get-MpPreference
-L ""
-L "=== 目前排除設定（未提權看不到，所以在這裡印）==="
-L "  排除路徑  : $(if($pref.ExclusionPath){($pref.ExclusionPath) -join ' | '}else{'（無）'})"
-L "  排除程序  : $(if($pref.ExclusionProcess){($pref.ExclusionProcess) -join ' | '}else{'（無）'})"
-L "  排除副檔名: $(if($pref.ExclusionExtension){($pref.ExclusionExtension) -join ' | '}else{'（無）'})"
+L ''
+L '=== Current exclusions ==='
+L "  Paths     : $(if ($pref.ExclusionPath)      { $pref.ExclusionPath      -join ' | ' } else { '(none)' })"
+L "  Processes : $(if ($pref.ExclusionProcess)   { $pref.ExclusionProcess   -join ' | ' } else { '(none)' })"
+L "  Extensions: $(if ($pref.ExclusionExtension) { $pref.ExclusionExtension -join ' | ' } else { '(none)' })"
 
-L ""
-L "=== 錄製 $Seconds 秒 ==="
-L "  現在請照常使用電腦，讓它錄到平常的負載。"
-if(Test-Path $etl){ Remove-Item -LiteralPath $etl -Force }
+L ''
+L "=== Recording for $Seconds s ==="
+L '  Use the machine normally so the recording captures a representative load.'
+if (Test-Path $etl) { Remove-Item -LiteralPath $etl -Force }
 try {
   New-MpPerformanceRecording -RecordTo $etl -Seconds $Seconds -ErrorAction Stop
-  L "  完成，ETL = $([math]::Round((Get-Item $etl).Length/1MB,1)) MB"
+  L ("  done, ETL = {0:N1} MB" -f ((Get-Item $etl).Length/1MB))
 } catch {
-  L "  ❌ 錄製失敗: $($_.Exception.Message)"
+  L "  X  recording failed: $($_.Exception.Message)"
   exit 1
 }
 
 $cpu1 = (Get-CimInstance Win32_Process -Filter "Name='MsMpEng.exe'" |
          ForEach-Object { ([double]$_.KernelModeTime + [double]$_.UserModeTime)/1e7 })
-L "  錄製期間 MsMpEng 用掉 $([math]::Round($cpu1-$cpu0,1)) 核心秒 = $([math]::Round(($cpu1-$cpu0)/$Seconds*100,1))% of one core"
+L ("  MsMpEng used {0:N1} core-seconds during the window = {1:N1}% of one core" -f `
+    ($cpu1-$cpu0), (($cpu1-$cpu0)/$Seconds*100))
 
-L ""
-# 注意：splat 一定要用「變數」@splat，不能寫 @($v.a) —— 後者會把 hashtable 包成陣列，
-# 變成位置引數傳進去，四段全部炸「找不到接受引數 System.Object[] 的位置參數」。
+L ''
+# Splatting must go through a variable. Writing @($v.Args) wraps the hashtable
+# in an array, which arrives as a positional argument and fails every section
+# with "cannot find a positional parameter that accepts argument
+# System.Object[]" -- silently blanking the entire report.
 $views = @(
-  @{ t='最耗時的檔案';     a=@{ TopFiles      = 25 }; f='Path' }
-  @{ t='最耗時的副檔名';   a=@{ TopExtensions = 25 }; f='Extension' }
-  @{ t='觸發掃描的進程';   a=@{ TopProcesses  = 25 }; f='ProcessPath' }
-  @{ t='最耗時的單次掃描'; a=@{ TopScans      = 25 }; f='Path' }
+  @{ Title='Costliest files';            Args=@{ TopFiles      = 25 }; Field='Path'        }
+  @{ Title='Costliest extensions';       Args=@{ TopExtensions = 25 }; Field='Extension'   }
+  @{ Title='Processes triggering scans'; Args=@{ TopProcesses  = 25 }; Field='ProcessPath' }
+  @{ Title='Costliest single scans';     Args=@{ TopScans      = 25 }; Field='Path'        }
 )
-foreach($v in $views){
-  L "=== $($v.t) ==="
+foreach ($v in $views) {
+  L "=== $($v.Title) ==="
   try {
-    $splat = $v.a
+    $splat = $v.Args
     $r = Get-MpPerformanceReport -Path $etl @splat -ErrorAction Stop
-    # 回傳是巢狀物件（.TopFiles / .TopExtensions / …），要先挖出那層
-    $rows = $r."$($v.a.Keys | Select-Object -First 1)"
-    if(-not $rows){ $rows = $r }
-    foreach($row in $rows){
-      $n = $row.($v.f); if(-not $n){ $n = '(未知)' }
-      L ("  {0,8:N0} ms  x{1,-5} {2}" -f $row.TotalDuration.TotalMilliseconds, $row.Count, $n)
+    # The result is a nested object (.TopFiles / .TopExtensions / ...), so the
+    # matching property has to be dug out before enumerating.
+    $rows = $r.($v.Args.Keys | Select-Object -First 1)
+    if (-not $rows) { $rows = $r }
+    foreach ($row in $rows) {
+      $n = $row.($v.Field); if (-not $n) { $n = '(unknown)' }
+      L ("  {0,9:N0} ms  x{1,-5} {2}" -f $row.TotalDuration.TotalMilliseconds, $row.Count, $n)
     }
-  } catch { L "  取得失敗: $($_.Exception.Message)" }
-  L ""
+  } catch { L "  failed: $($_.Exception.Message)" }
+  L ''
 }
 
-L "報告已存: $out"
-L "ETL 保留在: $etl（要重新分析可用 Get-MpPerformanceReport -Path 該檔）"
+L "Report saved to: $out"
+L "ETL kept at: $etl  (re-analyse with Get-MpPerformanceReport -Path <etl>)"

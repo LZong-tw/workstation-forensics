@@ -14,7 +14,8 @@
 param(
   [string]$Hotkey   = 'CTRL+ALT+S',
   [string]$TaskName = 'Slow Moment Capture',
-  [string]$Script   = 'C:\Users\LZong\Scripts\capture-slow-moment.ps1'
+  # Defaults to the capture script beside this one.
+  [string]$Script   = (Join-Path $PSScriptRoot 'capture-slow-moment.ps1')
 )
 
 $ErrorActionPreference = 'Stop'
@@ -68,7 +69,7 @@ Write-Host "Shortcut: $lnk"
 Write-Host "Hotkey  : $($v.Hotkey)" -ForegroundColor Green
 Write-Host ""
 Write-Host "Press $Hotkey anywhere. Two short beeps = fired, one long beep = done (~15 s)."
-Write-Host "Captures land in C:\Users\LZong\Scripts\slow-capture\<timestamp>\summary.txt"
+Write-Host "Captures land in $(Join-Path (Split-Path $Script -Parent) 'slow-capture')\<timestamp>\summary.txt"
 Write-Host "and are indexed on the Desktop in slow-captures.txt."
 Write-Host ""
 Write-Host "Caveat: Explorer registers .lnk hotkeys, so if Explorer itself is hung the"
