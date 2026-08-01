@@ -23,7 +23,8 @@
 
 param(
   [string]$OutRoot = 'C:\Users\LZong\Scripts\slow-capture',
-  [string]$Reason  = 'hotkey'
+  [string]$Reason  = 'hotkey',
+  [switch]$Silent          # suppress the completion beep entirely
 )
 
 $ErrorActionPreference = 'Continue'
@@ -31,9 +32,20 @@ $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $dir   = Join-Path $OutRoot $stamp
 New-Item -ItemType Directory -Path $dir -Force | Out-Null
 
-# Two short beeps: the hotkey fired. One long beep at the end: capture done.
-# Without this there is no way to tell a hidden scheduled task did anything.
-try { [Console]::Beep(1000,90); [Console]::Beep(1000,90) } catch { }
+# There is deliberately NO beep here, only at the end.
+#
+# The first version beeped twice on startup to confirm the hotkey fired. That
+# beep contaminated the very measurement it was announcing: on this machine any
+# audio session wakes Intelligo's audio APO (iGoSwServer.exe --apo
+# --server=session_monitor), which then burns ~85% of a core for about 20
+# seconds. Measured: 90 ms Console::Beep -> 16.9 core-seconds; a real WASAPI
+# sound -> 9.0 core-seconds; silent control -> 0.0. See
+# docs/audio-apo-cpu-burst.md.
+#
+# So the instrument was manufacturing a 90%-CPU process inside its own capture
+# window, and it showed up as the top CPU consumer in the first two captures.
+# The completion beep is kept because it fires after all data is collected --
+# use -Silent to suppress it too.
 
 $out = New-Object System.Collections.Generic.List[string]
 function W($m){ $out.Add([string]$m) }
@@ -216,5 +228,5 @@ W ("-- Capture cost: {0:N1} s --" -f $swTotal.Elapsed.TotalSeconds)
 "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')  $Reason  ->  $dir" |
   Out-File "$env:USERPROFILE\Desktop\slow-captures.txt" -Encoding utf8 -Append
 
-try { [Console]::Beep(600,350) } catch { }
+if (-not $Silent) { try { [Console]::Beep(600,350) } catch { } }
 Write-Host "captured to $dir  ($([math]::Round($swTotal.Elapsed.TotalSeconds,1)) s)"

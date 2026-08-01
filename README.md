@@ -139,9 +139,15 @@ it is happening and the machine's state at that instant is recorded.
 .\setup-slow-hotkey.ps1 -Hotkey 'CTRL+ALT+Q'
 ```
 
-Two short beeps mean the hotkey fired, one long beep means the capture is
-done (~15 s). Output lands in `slow-capture\<timestamp>\summary.txt`, indexed
-on the Desktop in `slow-captures.txt`.
+One beep means the capture is done (~15-20 s); `-Silent` suppresses it. Output
+lands in `slow-capture\<timestamp>\summary.txt`, indexed on the Desktop in
+`slow-captures.txt`.
+
+There is deliberately no beep at the *start*. The first version had one, and it
+contaminated its own measurement — see
+[`docs/audio-apo-cpu-burst.md`](docs/audio-apo-cpu-burst.md), which is also the
+one finding in this repo that is fully measured rather than inferred: on this
+machine any sound at all costs ~9-17 core-seconds of CPU.
 
 Records CPU delta / private / working set / handles / threads per process,
 per-core frequency, memory and paging counters, GPU engine use, per-process
