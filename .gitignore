@@ -1,0 +1,19 @@
+# Captured evidence never goes into git history.
+#
+# evidence/ holds .wer crash reports, systeminfo (hostname, BIOS, install date),
+# full driver inventories, and shell event logs. watch/ output holds process
+# dumps and ETW traces. All of it is machine-identifying and some of it is
+# gigabytes. Once committed it is permanent, so it is excluded from the very
+# first commit rather than scrubbed later.
+
+evidence/
+captures/
+*.dmp
+*.etl
+*.wer
+*.csv
+
+# Local instrument state
+dwm-growth.csv
+dwm-growth-trigger.log
+*.flag
