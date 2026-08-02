@@ -97,7 +97,11 @@ restart `dwm.exe`, and the evidence is gone. That has already happened once.
 So the trap has to fire **by itself**, before the human reacts. It runs from a
 scheduled task at `RunLevel Highest`, which does not raise a UAC prompt — one
 elevation buys permanent silent capture, including while the screen is off or
-the session is remote.
+the session is remote. The action is launched through a dedicated
+`task-dwm-growth-sample.vbs` (`WScript.Shell.Run` style 0) so the half-hourly
+sample does not flash a PowerShell console; `-WindowStyle Hidden` alone is not
+enough for Interactive tasks, and multi-arg `wscript` lines get mangled by the
+scheduler.
 
 ### Trigger signals
 

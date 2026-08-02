@@ -99,11 +99,16 @@ watch/
   dwm-growth-sample.ps1        one-shot sampler, 22 columns to CSV
   dwm-autocapture.ps1          full dump + symbolized stacks + 30 s ETL
   dwm-setup-elevated-task.ps1  registers the scheduled task at RunLevel Highest
+task-*.vbs (generated)         dedicated wscript launchers (no console flash)
 ```
 
 Setup is one elevated run of `dwm-setup-elevated-task.ps1`. Because the task
 runs at `RunLevel Highest`, it never raises a UAC prompt afterwards — capture
-works with the screen off or over a remote session.
+works with the screen off or over a remote session. The task action is
+`wscript → task-dwm-growth-sample.vbs → powershell` (not powershell directly):
+Interactive + Highest + `powershell.exe -WindowStyle Hidden` still flashes a
+console; `WScript.Shell.Run` style 0 does not. The VBS hardcodes paths because
+Task Scheduler mangles multi-argument `wscript` command lines.
 
 See [`docs/dwm-investigation.md`](docs/dwm-investigation.md).
 
