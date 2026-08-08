@@ -16,15 +16,50 @@ param(
   [string]$DataDir = $PSScriptRoot,
 
   # Signal 1: CPU milliseconds per composition pass on the hottest thread.
-  # Clean spread on the reference machine was 0.10-2.77 over 54 samples and the
-  # degraded reading was 8.7. This sits 1.4x above the noise ceiling and below
-  # half the degraded value.
-  [double]$ThresholdCost = 4.0,
+  # Degraded reading was 8.7.
+  #
+  # [RETRACTED] 4.0, the original value. It was calibrated on 54 samples whose
+  # clean spread was 0.10-2.77, and described as sitting 1.4x above the noise
+  # ceiling. At 320 samples the healthy maximum is 4.712: the threshold was
+  # inside the healthy distribution, and 8 samples had already crossed it --
+  # every one of them at a composition rate of 137-144/s, which is healthy.
+  # Nothing false-fired only because no two of those 8 were adjacent.
+  #
+  # The cost of a false fire is not a wasted capture. Fire() writes a flag and
+  # returns early for that pid and tag forever, so one false fire on day 7
+  # disarms the signal for a cycle that degrades on day 13.
+  #
+  # 6.0 sits between the healthy maximum 4.712 and the degraded 8.7. While the
+  # composition rate is pinned to vsync it also means "hot thread above 86%",
+  # which is independently abnormal.
+  [double]$ThresholdCost = 6.0,
 
   # Signal 2: handle count. Of the three candidates this was the most
   # monotonic -- it fell between adjacent samples only 20% of the time, total
   # range 1.10x. Degraded reading was 2532.
-  [int]$ThresholdHandles = 2400
+  #
+  # Known to be weak: the two-consecutive rule requires the baseline to cross,
+  # not a peak, and the baseline grows about +3.0/hour, reaching 2400 around day
+  # 13.8 against degradation observed on day 13.4. It arrives with the failure
+  # or after it. Kept because it costs nothing, not because it is relied on.
+  [int]$ThresholdHandles = 2400,
+
+  # Signal 3, and the one that carries the trap.
+  #
+  # Signals 1 and 2 are contaminated by workload. ms_per_pass_hot is
+  # hot_pct/100*1000/pass_per_s, so while the rate is pinned at 144 it is just
+  # hot_pct divided by 1.44 -- it rises whenever dwm is busy, degraded or not.
+  #
+  # p50_ms is not. Across 396 healthy samples spanning dwm CPU from 4% to 67%
+  # the median pass interval stays locked on 1/144 Hz = 6.944 ms: median 6.93,
+  # p95 7.00, p99 7.12, max 7.18, and nothing above 7.20. Degraded was 7.4-9.1,
+  # with the median itself pushed off vsync. 7.25 sits in the gap.
+  #
+  # Provenance, since it decides whether that gap is real: the degraded 7.4-9.1
+  # never entered the CSV -- it came from an ad-hoc measurement. But the healthy
+  # control from that same session read 6.94, against 6.93 across the sampler's
+  # 396 rows, so the two were measuring the same thing the same way.
+  [double]$ThresholdP50 = 7.25
 )
 
 $ErrorActionPreference = 'Continue'
@@ -148,6 +183,11 @@ $passPs = $r[0]
 $msPass    = if($cpuPct -and $passPs -gt 0){ [math]::Round($cpuPct/100*1000/$passPs, 3) } else { '' }
 $msPassHot = if($hotPct -ne '' -and $passPs -gt 0){ [math]::Round([double]$hotPct/100*1000/$passPs, 3) } else { '' }
 
+# Rounded exactly as it is written to CSV. The trap compares this sample against
+# the previous row, which is already rounded; without this the two sides of the
+# comparison would be on different scales.
+$p50ms = [math]::Round($r[1], 2)
+
 $gui = try { [G]::Gui($dwmPid) } catch { @(0,0) }
 
 # New columns always go on the end, so existing rows (which have only 20) stay
@@ -179,32 +219,60 @@ if(-not (Test-Path $csv)){ $head | Out-File $csv -Encoding utf8 }
 # feels slow, they restart dwm, and the evidence is gone". So the capture has
 # to fire before they react.
 #
-# Why two independent signals:
+# Why several independent signals:
 #
 # The first version watched ms_per_pass_hot alone. Twenty-four hours of data
 # then showed cost flat while retained resources climbed -- so if the next
 # degradation grows somewhere else, a single-signal trap never fires and the
-# whole instrument is wasted. Each signal now has its own flag file, so one
-# firing does not consume the other's chance.
+# whole instrument is wasted. Each signal has its own flag file, so one firing
+# does not consume another's chance.
 #
 # private_mb is deliberately NOT a signal. It looks like a memory leak and
 # behaves like noise: 256-1092 MB on a healthy process (4.27x, falling between
 # adjacent samples 33% of the time) and it has already exceeded the 795 MB seen
 # while degraded. Triggering on it would only waste capture opportunities.
 #
-# Both signals require two consecutive samples over threshold, so a transient
-# spike cannot fire them.
+# Every signal requires two consecutive samples over threshold, so a transient
+# spike cannot fire them. See the param block for each threshold's calibration.
 # ---------------------------------------------------------------------------
 
+# Whether to arm the trap at all.
+#
+# An unelevated run still writes its row -- data is data -- but must never fire.
+# dwm runs as DWM-1, so unelevated the hot thread reads 0, GetGuiResources gets
+# no privileged handle, and dwm-autocapture.ps1 can take neither a full dump nor
+# a trace. Since Fire() writes a flag that suppresses that signal for the rest
+# of the pid's life, an unelevated fire costs the signal and returns no
+# evidence, which is strictly worse than not firing.
+$elevated = (New-Object Security.Principal.WindowsPrincipal(
+              [Security.Principal.WindowsIdentity]::GetCurrent())
+            ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+
 # The previous row, for the same dwm PID, provides the "two consecutive" test.
+#
+# Walk back rather than taking [-2] unconditionally: an unelevated run writes a
+# differently shaped row (hot_pct 0, ms_per_pass_hot empty), and one of those
+# sitting in between makes the check read an empty value and skip a cycle in
+# silence. Bounded at 5 so a long gap cannot pass off stale data as "previous".
 $prevRow = $null
 $allRows = @(Get-Content $csv | Select-Object -Skip 1)
-if($allRows.Count -ge 2){
-  $p = $allRows[-2] -split ','
-  if($p.Count -ge 16 -and $p[1] -eq "$dwmPid"){ $prevRow = $p }
+for($k = 2; $k -le [math]::Min(6, $allRows.Count); $k++){
+  $p = $allRows[-$k] -split ','
+  if($p.Count -ge 16 -and $p[1] -eq "$dwmPid" -and $p[8] -and $p[11] -and $p[15]){
+    $prevRow = $p; break
+  }
 }
 
 function Fire($tag, $reason){
+  # Unelevated: do not fire, and deliberately do not write the flag either --
+  # leave the chance to the next elevated run. Recorded in the error file rather
+  # than the trigger log, because the trigger log's existence is the artifact
+  # that says the trap really fired and must not be polluted by skips.
+  if(-not $elevated){
+    "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')  [skipped-unelevated] $tag : $reason" |
+      Out-File $err -Encoding utf8 -Append
+    return
+  }
   $flag = Join-Path $DataDir "dwm-captured-$dwmPid-$tag.flag"
   if(Test-Path $flag){ return }
   New-Item -ItemType File -Path $flag -Force | Out-Null
@@ -225,6 +293,16 @@ if($msPassHot -ne '' -and [double]$msPassHot -gt $ThresholdCost -and $prevRow -a
 if([int]$d.HandleCount -gt $ThresholdHandles -and $prevRow -and $prevRow[15]){
   if([int]$prevRow[15] -gt $ThresholdHandles){
     Fire 'handles' "handles=$($d.HandleCount) prev=$($prevRow[15]) (threshold $ThresholdHandles, degraded reference 2532)"
+  }
+}
+
+# Signal 3: median composition interval leaving vsync
+# $prevRow[8] is p50_ms. Positional, not by name -- inserting a column anywhere
+# but the end silently makes this read something else, which is why $head says
+# new columns go on the end.
+if($p50ms -ne '' -and [double]$p50ms -gt $ThresholdP50 -and $prevRow -and $prevRow[8]){
+  if([double]$prevRow[8] -gt $ThresholdP50){
+    Fire 'p50' "p50_ms=$p50ms prev=$($prevRow[8]) (threshold $ThresholdP50, degraded reference 7.4-9.1)"
   }
 }
 

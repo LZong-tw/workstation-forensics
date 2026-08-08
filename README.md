@@ -112,31 +112,50 @@ Task Scheduler mangles multi-argument `wscript` command lines.
 
 See [`docs/dwm-investigation.md`](docs/dwm-investigation.md).
 
-Status as of 2026-08-02: **open.** A root-cause function has been identified
+Status as of 2026-08-08: **open.** A root-cause function has been identified
 from a single degraded observation plus a single healthy control. The trap that
 would produce a second degraded sample is armed and has not yet fired. Read the
 document's confidence markers before relying on anything in it.
 
+The thresholds were recalibrated on 2026-08-08 against 396 healthy samples,
+because the original was set from 71 and had drifted *inside* the healthy
+distribution as more data arrived — it had already been crossed eight times by a
+compositor that was merely busy, and escaped firing only because no two of those
+crossings were adjacent. Two things there generalise past this bug. A threshold
+picked from an early, narrow sample is a claim with an expiry date, so re-derive
+it as the sample grows. And a trap that disarms itself on a false positive is
+one bad calibration away from being decorative — which is why the trap is now
+skipped entirely when unelevated, where it could have consumed a signal and
+still captured nothing.
+
 ### The running instrument is a separate copy
 
 On the machine the investigation is running on, these scripts are driven by a
-scheduled task from a different directory, and **that copy is deliberately left
-alone** while the investigation is open. Repointing a task that is mid-run risks
-a gap in sampling, and the point of the trap is to be there when degradation
-happens.
+scheduled task from a different directory. **The scheduled task is never
+repointed** while the investigation is open: that would risk a gap in sampling,
+and the point of the trap is to be there when degradation happens.
 
-The copies here are the generalized ones: paths default off `$PSScriptRoot`, so
-they work wherever they are installed, including from the original location.
-They are verified independently rather than assumed —
-`watch/dwm-growth-sample.ps1` was run against a scratch `-DataDir` and produced
-a well-formed 22-column row without touching the live data set.
+Editing the script the task already points at is a different matter and is
+fine — the path is resolved on each run, so a corrected script takes effect at
+the next sample with no gap. That is how the 2026-08-08 threshold recalibration
+was applied, and the copies here are the same change ported over.
 
-One caveat, stated rather than glossed: that verification ran **unelevated**, so
+The copies here are the generalized ones: paths default off `$PSScriptRoot` and
+thresholds are parameters, so they work wherever they are installed. They are
+verified rather than assumed. `watch/dwm-growth-sample.ps1` was run against a
+scratch `-DataDir`, producing a well-formed 22-column row without touching the
+live data set, and both trap branches were then exercised there: unelevated
+skips without writing a flag, and a forced-elevated copy writes the flag,
+appends to the trigger log, and invokes autocapture (a harmless stand-in, so no
+dump was taken).
+
+One caveat, stated rather than glossed: those runs were **unelevated**, so
 `hot_pct`, `ms_per_pass_hot` and the GDI/USER columns came back empty. Those
 paths need elevation by design (dwm runs as `DWM-1`, and `GetGuiResources` needs
 a privileged handle). The logic is carried over line-for-line from the copy that
-does run elevated and does populate them, but the elevated path has not been
-re-run against this version.
+does run elevated and does populate them, but the elevated *collection* path has
+not been re-run against this version. The elevated *trap* path has, by
+overriding the elevation probe.
 
 ---
 

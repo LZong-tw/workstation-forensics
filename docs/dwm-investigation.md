@@ -1,6 +1,12 @@
 # DWM gradual degradation — investigation log
 
-**Status: OPEN.** Started 2026-07-31. Last updated 2026-08-02.
+**Status: OPEN.** Started 2026-07-31. Last updated 2026-08-08.
+
+The trap has not fired. A second boot cycle is 6.6 days in with no sign of
+degradation — the median composition interval is still locked on vsync. The
+trap's thresholds were recalibrated on 2026-08-08 against 396 samples after the
+original `ms_per_pass_hot` threshold turned out to sit inside the healthy
+distribution; see [Recalibrating the trap](#recalibrating-the-trap-2026-08-08-measured).
 
 Confidence markers are used throughout and mean what they say:
 
@@ -105,13 +111,19 @@ scheduler.
 
 ### Trigger signals
 
-Two independent signals, each requiring **two consecutive** samples over
+Three independent signals, each requiring **two consecutive** samples over
 threshold so a transient spike cannot fire it:
 
-| signal | threshold | degraded reference | healthy max (n=71) |
+| signal | threshold | degraded reference | healthy max (n=396) |
 |---|---|---|---|
-| `ms_per_pass_hot` | 4.0 | 8.7 | 2.77 |
-| `handles` | 2400 | 2532 | 1840 |
+| `p50_ms` | 7.25 | 7.4–9.1 | **7.18** |
+| `ms_per_pass_hot` | 6.0 | 8.7 | 4.712 |
+| `handles` | 2400 | 2532 | 1955 |
+
+Recalibrated 2026-08-08 against 396 samples; the original figures were set from
+71. See [Recalibrating the trap](#recalibrating-the-trap-2026-08-08-measured)
+below for why the first `ms_per_pass_hot` threshold was inside the healthy
+distribution, and why `p50_ms` now carries the trap.
 
 `private_mb` was **deliberately excluded** as a signal. It looks like a memory
 leak and behaves like noise: over 71 healthy samples it ranges 256–1092 MB
@@ -166,6 +178,102 @@ Mitigation is that `ms_per_pass_hot` is an independent signal measuring the
 actual symptom rather than a proxy. If handles saturate, that one should still
 catch it. This is the reason there are two signals and not one.
 
+**Update 2026-08-08 [MEASURED].** Both halves of that turned out to be wrong,
+in opposite directions, and the mitigation was wrong too.
+
+Over a full 158 h cycle handles ran 1447 → 1955, about **+3.0/hour** — not the
++6.9/hour measured over the first 31 h, but not saturating either. Projected,
+the baseline crosses 2400 near day 13.8, against degradation observed on day
+13.4. The signal does not fail to fire; it fires *level with or later than* the
+event it is supposed to pre-empt. And because the rule needs two consecutive
+samples, what has to cross is the baseline, not a peak — handles swing about
+±300 within a single day.
+
+The mitigation sentence was the real error: `ms_per_pass_hot` is **not** an
+independent measurement of the symptom. See below.
+
+## Recalibrating the trap (2026-08-08) [MEASURED]
+
+### `ms_per_pass_hot` was measuring workload, not degradation
+
+```
+ms_per_pass_hot = hot_pct / 100 * 1000 / pass_per_s
+```
+
+While the composition rate is pinned to vsync at ~144, that is just
+`hot_pct / 1.44`. It is a rescaling of "how busy is the compositor thread",
+carrying no information the CPU column does not already have. The apparent
+tenfold growth in `ms_per_pass` across the cycle was `cpu_pct` moving 4.26 →
+43.49 between 12-hour buckets — and it moved back to 10.67 in the next bucket.
+That is what the user was doing, not what dwm was becoming.
+
+### The threshold sat inside the healthy distribution
+
+`ms_per_pass_hot > 4.0` was calibrated when the healthy spread was 0.10–2.77
+over 54 samples. At 320 samples the healthy maximum is **4.712**, and eight
+samples had already crossed 4.0 — every one of them at `pass_per_s` of 137–144,
+which is a healthy composition rate.
+
+Nothing false-fired only because no two of those eight were adjacent. That is
+luck, not debounce, and the stake is higher than one wasted capture: `Fire()`
+writes `dwm-captured-<pid>-<tag>.flag` and returns early for the rest of that
+pid's life, so **one false fire on day 7 disarms the signal for a cycle that
+degrades on day 13**.
+
+Raised to 6.0, which sits between the healthy maximum 4.712 and the degraded
+8.7, and which — while the rate is pinned — also means the hot thread is above
+86%, independently abnormal.
+
+### `p50_ms` is the signal that survives the objection
+
+| | healthy (n=396) | degraded |
+|---|---|---|
+| `p50_ms` | median 6.93, p95 7.00, p99 7.12, **max 7.18**, none above 7.20 | 7.4–9.1 |
+
+Those 396 samples span dwm CPU from 4% to 67%. The median pass interval stays
+locked on 1/144 Hz = 6.944 ms regardless, because it is a robust statistic: it
+moves only when the whole distribution stretches, which is exactly what
+degradation does and what a busy compositor does not. Threshold 7.25 sits in
+the gap. It uses column 8, already present, so no schema change was needed —
+which matters, because the debounce reads `$prevRow[11]` and `$prevRow[15]` by
+position and any inserted column would silently repoint them.
+
+**Provenance, since it decides whether that gap is real:** the degraded 7.4–9.1
+never entered the CSV; it came from the ad-hoc 07-31 session. But the healthy
+control from that same session read 6.94, against 6.93 across the sampler's 396
+rows — the two were measuring the same thing the same way.
+
+### An unelevated run could burn a signal and capture nothing
+
+Independent of any threshold. Run unelevated, the sampler still reaches the
+trap, and `Fire()` still writes the flag — but `dwm-autocapture.ps1` can take
+neither a full dump nor a trace without elevation. The result is the signal
+consumed and no evidence, which is strictly worse than not firing.
+
+The trap is now skipped entirely when not elevated, and deliberately writes no
+flag, leaving the chance to the next scheduled (elevated) run. It is recorded
+in `dwm-growth-error.txt` rather than `dwm-growth-trigger.log`, because the
+trigger log's existence is the artifact that says the trap really fired.
+
+Relatedly, `$prevRow` now walks back to the most recent *complete* row for the
+same pid instead of taking `[-2]` unconditionally. An unelevated sample writes a
+differently shaped row — `hot_pct` 0, `ms_per_pass_hot` empty — and one of those
+in between made the check read an empty value and skip a cycle in silence.
+
+### Verification
+
+Replaying all 398 stored rows through the new thresholds produces **zero** false
+fires on all three signals, and feeding the degraded reference values (7.4 /
+8.7 / 2532) fires all three. Both trap branches were then exercised end to end
+in an isolated `-DataDir`: unelevated skips without writing a flag, forced-
+elevated writes the flag, appends to the trigger log, and invokes autocapture.
+
+One caveat on the data set: the row stamped `2026-08-08 16:40:45` is an
+instrument artifact, not an observation — an unelevated verification run, and
+the only row of the 399 with `hot_pct` 0 and `ms_per_pass_hot` empty. It was
+left in place rather than quietly edited out, and analysis should exclude it.
+That row is also what exposed the `$prevRow` problem above.
+
 ## Timeline correlation [INFERRED]
 
 The machine booted 2026-07-18 06:08. DWM uptime at the point of degradation was
@@ -184,6 +292,21 @@ evidence supported, and the pattern is the point.
 **[RETRACTED] "Memory grew ~3x, from 290 MB healthy to 795 MB degraded."**
 Healthy `private_mb` swings 256–1092 MB and has already exceeded 795 MB with
 nothing wrong. The memory evidence for `CleanTrees` does not exist.
+
+**[RETRACTED] "`ms_per_pass_hot > 4.0` sits 1.4x above the noise ceiling."**
+True of the 54 samples it was calibrated on; false by 320. The healthy maximum
+is 4.712, so the threshold was *inside* the healthy distribution and eight
+samples had already crossed it at a perfectly healthy composition rate. The
+deeper error was treating it as an independent measurement of the symptom at
+all: while the rate is vsync-pinned it is `hot_pct / 1.44` and nothing more.
+Raised to 6.0, and `p50_ms` added as the signal that is actually robust to
+workload. See [Recalibrating the trap](#recalibrating-the-trap-2026-08-08-measured).
+
+**[RETRACTED] "If handles saturate below 2400 the signal never fires."** Stated
+as the risk to watch; the real behaviour is worse-but-different. Handles grew
++3.0/hour over a full cycle rather than saturating, which puts the crossing at
+about day 13.8 — level with or later than the degradation it was meant to
+anticipate. Not a signal that fails to fire, a signal that fires too late.
 
 **[RETRACTED] "DWM CPU grew about 2x."** The two numbers compared — 69.7% and
 138% — had different baselines (a 13-day mixed-workload average vs. a pure-idle
