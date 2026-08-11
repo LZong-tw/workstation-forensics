@@ -63,8 +63,21 @@ $action = New-ScheduledTaskAction -Execute $wscript -Argument $arg
 $t1 = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) `
         -RepetitionInterval (New-TimeSpan -Minutes $IntervalMinutes)
 $t2 = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
+# ExecutionTimeLimit was 10 minutes, and on 2026-08-11 it truncated a capture.
+# A plain sample takes ~11 s, but when the trap fires the task also runs
+# dwm-autocapture.ps1 synchronously: full dump, cdb stacks, then a 30 s WPR trace
+# whose MERGE step alone can run for many minutes on a multi-GB ETL. Two earlier
+# captures finished in 193 s and 190 s and fit inside 10 minutes; the third did
+# not, and Task Scheduler killed the whole tree mid-merge (LastTaskResult
+# 0x41306, SCHED_S_TASK_TERMINATED). That left a truncated ETL and an orphaned
+# wpr.exe still holding it open.
+#
+# 25 minutes, and deliberately not more: with MultipleInstances IgnoreNew and a
+# 30-minute interval, this limit is the only thing stopping one wedged run from
+# blocking every later sample. At 25 a stuck run costs exactly one skipped
+# sample.
 $set = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
-        -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 10) `
+        -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 25) `
         -Hidden
 # Highest   = no UAC prompt when the trap fires.
 # Interactive = the sampler can see DWM at all; DwmFlush must run inside the
