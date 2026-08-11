@@ -111,19 +111,42 @@ scheduler.
 
 ### Trigger signals
 
-Three independent signals, each requiring **two consecutive** samples over
+Four independent signals, each requiring **two consecutive** samples over
 threshold so a transient spike cannot fire it:
 
-| signal | threshold | degraded reference | healthy max (n=396) |
-|---|---|---|---|
-| `p50_ms` | 7.25 | 7.4–9.1 | **7.18** |
-| `ms_per_pass_hot` | 6.0 | 8.7 | 4.712 |
-| `handles` | 2400 | 2532 | 1955 |
+| signal | threshold | degraded reference | healthy max | n |
+|---|---|---|---|---|
+| `p90_ms` | 14 | 16 of 51 samples above | **13.74** | 401 |
+| `p50_ms` | 7.25 | 7.4–9.1 | 7.18 | 396 |
+| `ms_per_pass_hot` | 6.0 | 8.7 | 4.712 | 396 |
+| `handles` | 2400 | 2532 | 1955 | 396 |
 
 Recalibrated 2026-08-08 against 396 samples; the original figures were set from
 71. See [Recalibrating the trap](#recalibrating-the-trap-2026-08-08-measured)
 below for why the first `ms_per_pass_hot` threshold was inside the healthy
-distribution, and why `p50_ms` now carries the trap.
+distribution.
+
+`p90_ms` was added 2026-08-11 and now carries the trap, demoting `p50_ms` to a
+backstop. **`p50_ms` is a lagging indicator**: on the 2026-08-10 cycle,
+composition throughput had already fallen from its vsync-pinned 144/s to 136/s
+by 09:10, but `p50_ms` did not cross 7.25 until 06:10 the next morning — 21
+hours later. Both captures it produced were taken a day after onset.
+
+While healthy, `p90` equals `p50` equals 6.94: every frame lands on exactly one
+vsync interval, so `p90` rising at all means frames are being dropped. Over 401
+healthy samples it reached at most 13.74; a threshold of 14 is hit by none of
+them, so it sits outside the healthy distribution rather than being rescued by
+the two-consecutive rule. Backtested first fire is 14.5 hours earlier than the
+signal that actually fired.
+
+`pass_per_s` was **rejected** as a trigger despite looking like the cleanest
+signal of all — it is pinned to exactly 144.0 while healthy. Its tail is not
+clean: healthy samples reach down to 118.5, with p1 at 134.1, so "below 138,
+twice consecutively" would have false-fired on 2026-08-04. Judging a threshold
+by the median while ignoring the tail is precisely how `ms_per_pass_hot` came to
+be 4.0. A combined `pass < 138 AND p90 > 12` was also tested and rejected: 3 of
+401 healthy samples match it, and those 3 are exactly the healthy `p90` maxima,
+so the `pass` term filters out nothing.
 
 `private_mb` was **deliberately excluded** as a signal. It looks like a memory
 leak and behaves like noise: over 71 healthy samples it ranges 256–1092 MB

@@ -59,7 +59,38 @@ param(
   # never entered the CSV -- it came from an ad-hoc measurement. But the healthy
   # control from that same session read 6.94, against 6.93 across the sampler's
   # 396 rows, so the two were measuring the same thing the same way.
-  [double]$ThresholdP50 = 7.25
+  #
+  # [DEMOTED 2026-08-11] p50 is a lagging indicator, kept only as a backstop.
+  # Composition throughput had already fallen to 136/s at 2026-08-10 09:10, but
+  # p50 did not cross 7.25 until 2026-08-11 06:10 -- 21 hours late. Both captures
+  # it produced were taken a day after the fact.
+  [double]$ThresholdP50 = 7.25,
+  # Signal 4, and the one that now carries the trap.
+  #
+  # While healthy, p90 equals p50 equals 6.94: every frame lands on exactly one
+  # vsync interval. So p90 rising at all means frames are being dropped, which
+  # happens well before the median moves -- p50 only shifts once MOST frames are
+  # late.
+  #
+  # Calibrated over 525 samples of one dwm instance, using the sustained
+  # throughput break at 2026-08-10 09:10 as ground truth:
+  #   healthy, 401 samples: p90 min 7.10, p99 11.45, max 13.74
+  #   degraded, 51 samples: 16 above 14
+  # A threshold of 14 is hit by 0 of 401 healthy samples -- it is outside the
+  # healthy distribution entirely, not merely rescued by the two-consecutive
+  # rule. Backtested first fire: 2026-08-10 15:40, 14.5 hours before the p50
+  # signal actually fired.
+  #
+  # pass_per_s looks like the better signal -- it is pinned to 144.0 while
+  # healthy -- but it must NOT be used as a trigger. Healthy samples reach down
+  # to min 118.5 and p1 134.1, so "below 138, twice consecutively" would have
+  # false-fired on 2026-08-04. Judging a threshold by the median while ignoring
+  # the tail is exactly how ThresholdCost came to be 4.0.
+  #
+  # A combined "pass below 138 AND p90 above 12" was also tested: 3 of 401
+  # healthy samples match, and those 3 are precisely the healthy p90 maxima --
+  # the pass term filters out nothing, so the extra condition is dead weight.
+  [double]$ThresholdP90 = 14
 )
 
 $ErrorActionPreference = 'Continue'
@@ -187,6 +218,7 @@ $msPassHot = if($hotPct -ne '' -and $passPs -gt 0){ [math]::Round([double]$hotPc
 # the previous row, which is already rounded; without this the two sides of the
 # comparison would be on different scales.
 $p50ms = [math]::Round($r[1], 2)
+$p90ms = [math]::Round($r[2], 2)
 
 $gui = try { [G]::Gui($dwmPid) } catch { @(0,0) }
 
@@ -258,7 +290,7 @@ $prevRow = $null
 $allRows = @(Get-Content $csv | Select-Object -Skip 1)
 for($k = 2; $k -le [math]::Min(6, $allRows.Count); $k++){
   $p = $allRows[-$k] -split ','
-  if($p.Count -ge 16 -and $p[1] -eq "$dwmPid" -and $p[8] -and $p[11] -and $p[15]){
+  if($p.Count -ge 16 -and $p[1] -eq "$dwmPid" -and $p[8] -and $p[9] -and $p[11] -and $p[15]){
     $prevRow = $p; break
   }
 }
@@ -303,6 +335,15 @@ if([int]$d.HandleCount -gt $ThresholdHandles -and $prevRow -and $prevRow[15]){
 if($p50ms -ne '' -and [double]$p50ms -gt $ThresholdP50 -and $prevRow -and $prevRow[8]){
   if([double]$prevRow[8] -gt $ThresholdP50){
     Fire 'p50' "p50_ms=$p50ms prev=$($prevRow[8]) (threshold $ThresholdP50, degraded reference 7.4-9.1)"
+  }
+}
+
+# Signal 4: p90 composition interval -- frames starting to drop. This is the one
+# that carries the trap; it leads the p50 signal by about 14.5 hours.
+# $prevRow[9] is p90_ms. Positional, same caveat as above.
+if($p90ms -ne '' -and [double]$p90ms -gt $ThresholdP90 -and $prevRow -and $prevRow[9]){
+  if([double]$prevRow[9] -gt $ThresholdP90){
+    Fire 'p90' "p90_ms=$p90ms prev=$($prevRow[9]) (threshold $ThresholdP90, healthy max 13.74 over 401 samples)"
   }
 }
 

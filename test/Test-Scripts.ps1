@@ -68,6 +68,16 @@ foreach ($s in $scripts) {
 }
 
 Write-Host ""
+
+# Behavioural tests live in their own file; run them here so one command covers
+# the repo.
+$behavioural = Join-Path $PSScriptRoot 'Test-DwmTrap.ps1'
+if (Test-Path $behavioural) {
+  & (Get-Process -Id $PID).Path -NoProfile -File $behavioural
+  if ($LASTEXITCODE -ne 0) { Fail 'test\Test-DwmTrap.ps1' 'behavioural tests failed' }
+  Write-Host ""
+}
+
 if ($failures.Count) {
   Write-Host "$($failures.Count) failure(s)." -ForegroundColor Red
   exit 1
