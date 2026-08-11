@@ -63,14 +63,20 @@ $action = New-ScheduledTaskAction -Execute $wscript -Argument $arg
 $t1 = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) `
         -RepetitionInterval (New-TimeSpan -Minutes $IntervalMinutes)
 $t2 = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
-# ExecutionTimeLimit was 10 minutes, and on 2026-08-11 it truncated a capture.
+# ExecutionTimeLimit was 10 minutes and the capture on 2026-08-11 outgrew it.
 # A plain sample takes ~11 s, but when the trap fires the task also runs
 # dwm-autocapture.ps1 synchronously: full dump, cdb stacks, then a 30 s WPR trace
 # whose MERGE step alone can run for many minutes on a multi-GB ETL. Two earlier
-# captures finished in 193 s and 190 s and fit inside 10 minutes; the third did
-# not, and Task Scheduler killed the whole tree mid-merge (LastTaskResult
-# 0x41306, SCHED_S_TASK_TERMINATED). That left a truncated ETL and an orphaned
-# wpr.exe still holding it open.
+# captures finished in 193 s and 190 s and fit inside 10 minutes. The third
+# needed 20 min 40 s, so Task Scheduler terminated the task at the limit
+# (LastTaskResult 0x41306, SCHED_S_TASK_TERMINATED).
+#
+# It survived by accident: killing the task killed the wscript launcher, but the
+# powershell and wpr descendants were not in the job object and kept running as
+# orphans, finishing the 8.5 GB trace 20 minutes after the task was declared
+# dead. Nothing should depend on that. Whether descendants outlive a terminated
+# task is not a guarantee, and a capture that only completes because a process
+# escaped supervision is a capture that can silently half-complete instead.
 #
 # 25 minutes, and deliberately not more: with MultipleInstances IgnoreNew and a
 # 30-minute interval, this limit is the only thing stopping one wedged run from
