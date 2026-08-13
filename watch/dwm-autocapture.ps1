@@ -42,6 +42,15 @@ $d = Get-CimInstance Win32_Process -Filter "Name='dwm.exe'" | Select-Object -Fir
 $dwmPid = [int]$d.ProcessId
 L "dwm PID     : $dwmPid   alive $([math]::Round(((Get-Date)-$d.CreationDate).TotalHours,2)) h"
 L "Private     : $([math]::Round($d.PrivatePageCount/1MB,0)) MB   Handles: $($d.HandleCount)   Threads: $($d.ThreadCount)"
+
+# Chrome Remote Desktop's Desktop Duplication API render target adds its own
+# dirty-region + occlusion pass, measured to exactly double per-frame
+# occlusion work (0.55/frame at crd=0 vs 1.10/frame at crd=1). That is a
+# constant cost, not something that accumulates -- but without recording
+# whether it was active, a capture cannot be told apart from a genuinely
+# worse degradation after the fact. See docs/dwm-investigation.md.
+$crd = @(Get-Process -Name 'remoting_desktop' -ErrorAction SilentlyContinue)
+L "CRD         : $(if($crd.Count){"connected (remoting_desktop.exe x$($crd.Count)) -- occlusion cost is roughly doubled"}else{'none'})"
 L ""
 
 if(-not $elevated){
@@ -105,16 +114,51 @@ if($elevated){
   L "=== wpr, 30 s ==="
   try {
     & wpr.exe -cancel 2>&1 | Out-Null
-    $r = & wpr.exe -start CPU -start DesktopComposition -start GPU -filemode 2>&1 | Out-String
+    # Try to include hardware PMC (InstructionRetired/TotalCycles/LLCMisses,
+    # see dwm-pmc.wprp) alongside the usual providers. This is what tells
+    # apart "pruning failure" (walk visits more nodes, IPC stays flat) from
+    # "iterator slowdown" (same nodes, each one costs more, IPC collapses) --
+    # see docs/dwm-investigation.md. Falls back cleanly if PMC cannot be
+    # programmed; dwm-pmc-probe.ps1 already confirmed this combination starts
+    # on the machine it was verified on, but PMC availability is
+    # hardware/hypervisor-dependent and is not assumed here.
+    $pmcWprp = Join-Path $PSScriptRoot 'dwm-pmc.wprp'
+    $usedPmc = $false
+    if(Test-Path $pmcWprp){
+      $r = & wpr.exe -start CPU -start DesktopComposition -start GPU -start "$pmcWprp!DwmPmcFull" -filemode 2>&1 | Out-String
+      if($LASTEXITCODE -eq 0){ $usedPmc = $true }
+      else { L "  PMC combination failed to start, falling back: $($r.Trim())"; & wpr.exe -cancel 2>&1 | Out-Null }
+    }
+    if(-not $usedPmc){
+      $r = & wpr.exe -start CPU -start DesktopComposition -start GPU -filemode 2>&1 | Out-String
+    }
     if($LASTEXITCODE -ne 0){
       & wpr.exe -cancel 2>&1 | Out-Null
       $r = & wpr.exe -start CPU -filemode 2>&1 | Out-String
       L "  fell back to CPU only: exit=$LASTEXITCODE"
     }
+    L "  PMC: $(if($usedPmc){'included'}else{'not included'})"
     if($LASTEXITCODE -eq 0){
       Start-Sleep 30
       & wpr.exe -stop "$dir\dwm.etl" 2>&1 | Out-Null
-      if(Test-Path "$dir\dwm.etl"){ L "  ETL = $([math]::Round((Get-Item "$dir\dwm.etl").Length/1MB,1)) MB  <- open with wpa.exe" }
+      if(Test-Path "$dir\dwm.etl"){
+        L "  ETL = $([math]::Round((Get-Item "$dir\dwm.etl").Length/1MB,1)) MB  <- open with wpa.exe"
+        if($usedPmc){
+          $pv = Join-Path $PSScriptRoot 'dwm-pmc-verify.ps1'
+          if(Test-Path $pv){
+            try {
+              # Route through Write-Output, not Console.WriteLine/Write-Host --
+              # both of those bypass the success stream and this capture is
+              # pulled through a pipeline (`| Out-String`), not watched
+              # interactively. Learned by losing a real capture's IPC numbers
+              # to exactly this; see dwm-pmc-verify.ps1's header.
+              $vout = & $pv -EtlPath "$dir\dwm.etl" 2>&1 | Out-String
+              $sel = ($vout -split "`r?`n") | Where-Object { $_ -match 'IPC|instructions|cycles|lost events|LLC miss' }
+              foreach($s in $sel){ L "  $($s.Trim())" }
+            } catch { L "  PMC verification exception: $($_.Exception.Message)" }
+          }
+        }
+      }
       else { L "  X  no ETL produced" }
     } else { L "  X  could not start collection: $($r.Trim())" }
   } catch { L "  exception: $($_.Exception.Message)" }

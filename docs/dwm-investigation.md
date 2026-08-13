@@ -1,12 +1,23 @@
 # DWM gradual degradation — investigation log
 
-**Status: OPEN.** Started 2026-07-31. Last updated 2026-08-08.
+**Status: OPEN.** Started 2026-07-31. Last updated 2026-08-13.
 
-The trap has not fired. A second boot cycle is 6.6 days in with no sign of
-degradation — the median composition interval is still locked on vsync. The
-trap's thresholds were recalibrated on 2026-08-08 against 396 samples after the
-original `ms_per_pass_hot` threshold turned out to sit inside the healthy
-distribution; see [Recalibrating the trap](#recalibrating-the-trap-2026-08-08-measured).
+The trap has since fired repeatedly, and the mechanism is now localized to a
+specific per-frame walk driven by hardware-overlay (MPO) candidate evaluation
+— see [Mechanism](#mechanism-mpo-overlay-candidate-occlusion-walk-measured).
+What remains open is *why* that walk gets more expensive: two candidate
+causes predict different hardware-counter behaviour, and the discriminator
+built to tell them apart currently leans toward one but is not closed on a
+single sample — see
+[PMC: instructions-per-cycle as a discriminator](#pmc-instructions-per-cycle-as-a-discriminator).
+The original framing below, "gets progressively worse over a period of
+days", also turned out to be wrong in a way worth reading before the rest of
+this document — see
+[Not gradual: a single onset event](#not-gradual-a-single-onset-event-measured).
+The trap's thresholds were recalibrated on 2026-08-08 against 396 samples
+after the original `ms_per_pass_hot` threshold turned out to sit inside the
+healthy distribution; see
+[Recalibrating the trap](#recalibrating-the-trap-2026-08-08-measured).
 
 Confidence markers are used throughout and mean what they say:
 
@@ -20,10 +31,16 @@ Confidence markers are used throughout and mean what they say:
 ## Symptom
 
 On this machine (ASUS ExpertBook B5405CCA, Windows 11 build 26200, Intel Arc
-140T, 16 logical cores, 31.25 GB RAM), `dwm.exe` gets progressively worse over
-a period of days. The desktop grows sluggish — window drags, animations, and
+140T, 16 logical cores, 31.25 GB RAM), `dwm.exe` gets worse after enough
+uptime. The desktop grows sluggish — window drags, animations, and
 compositor-driven UI stutter — while no single application is obviously at
 fault.
+
+**This was originally described as "gets progressively worse over a period of
+days" — that is retracted.** The real shape is a single onset event after
+roughly 8 days of uptime, followed by intermittent bouts rather than a
+continuous slope; see
+[Not gradual: a single onset event](#not-gradual-a-single-onset-event-measured).
 
 Restarting `dwm.exe` restores full performance instantly. That is also why the
 problem has no public paper trail: the fix is trivial, so nobody keeps the
@@ -76,6 +93,18 @@ observation and *one* healthy control. A single stack sample proves where the
 thread was at that instant, not where it spends its time. Confirming this needs
 a second degraded capture with sampled stacks, which is what the watcher exists
 to produce, and which **has not happened yet**.
+
+**Update 2026-08-11 to 2026-08-13 [MEASURED].** The trap has since fired
+several more times with call-path exports, and this has been substantially
+refined rather than confirmed as-is: `CleanTrees` is real (it recurs across
+independent captures) but it is one of five per-frame tree walks, and the one
+that grows disproportionately is a different one, rooted in hardware-overlay
+candidate evaluation rather than in `CleanTrees` itself. See
+[Mechanism](#mechanism-mpo-overlay-candidate-occlusion-walk-measured) below
+for the full chain and the per-frame numbers. The single-observation caveat
+above no longer applies to *where* the cost is — that is now measured across
+five independent captures. It still applies to *why* the walk gets more
+expensive, which is the open question that section ends on.
 
 ## What the watcher does
 
@@ -307,6 +336,247 @@ That is **consistent with** DWM having been alive since first interactive
 logon, and not with a mid-cycle restart. It is not proof — the 13 d 9 h figure
 was read at the time and cannot be re-verified now that the process is gone.
 
+## Not gradual: a single onset event [MEASURED]
+
+A full-sequence analysis of all 545 rows collected by `dwm-growth-sample.ps1`
+across 11 days and two dwm process generations overturned the framing this
+document opened with.
+
+**There is no gradual slope.** The first process instance (pid 2728) ran
+completely normally for its first **199 hours** (`ms_per_pass_hot` median
+0.167–0.217, `pass_per_s` pinned at 144 the whole time), then one row —
+2026-08-10 09:10:39 — starts a period of intermittent, self-clearing
+degradation bouts. `dwm_up_h` correlates with cost at only spearman **0.245**:
+uptime gates *whether* the failure mode is reachable, it is a weak predictor
+of *how bad* any given sample is.
+
+**Memory does not correlate with severity, in either direction.** Private
+bytes vs. cost: pearson 0.098, spearman **−0.141**. The series itself swings
+328↔1222 MB with no relationship to whether a given sample is degraded. The
+lowest-memory sample on record (342 MB) was mid-spike; the highest-memory
+sample (1224 MB) was fully healthy, minutes after a spike had already cleared
+on its own without a restart. A tree that leaks and grows monotonically would
+not produce this.
+
+**A bout clears itself.** Confirmed by watching one resolve without touching
+`dwm.exe`:
+
+```
+09:10  p50 21.11 ms  pass  46.3/s  private 1222 MB  gpu 1079 MB  degraded
+09:40  p50  7.02 ms  pass 131.8/s  private 1224 MB  gpu  872 MB  recovered, private unchanged
+```
+
+**Window count does not track it either.** `top_windows` holds 395–438 across
+the whole 11-day series regardless of state; before/after a dwm restart it
+moved 436 → 404 (7%) while per-frame walk cost dropped roughly two orders of
+magnitude in the same comparison (see
+[Mechanism](#mechanism-mpo-overlay-candidate-occlusion-walk-measured)). What
+is accumulating is invisible to every column this instrument currently
+records.
+
+**Two independent, multiplicative factors, not one.** Splitting the series
+2×2 by onset (before/after 2026-08-10 09:10) and by Chrome Remote Desktop
+capture state:
+
+| median `ms_per_pass_hot` | CRD idle | CRD capturing | CRD multiplier |
+|---|---|---|---|
+| before onset | 0.229 (n=309) | 1.317 (n=92) | **5.8x** |
+| after onset | 1.727 (n=37) | 5.265 (n=29) | **3.0x** |
+| onset multiplier | **7.5x** | **4.0x** | combined 23x |
+
+The CRD effect is present before onset too, so it is not a confound created
+by onset; the onset effect is present under both CRD states, so it is not an
+artifact of CRD connecting more often post-onset (23% → 44% of samples). An
+unsplit correlation would overstate the CRD effect — this is why it is
+reported split rather than as one pooled number.
+
+**A time-coincident hypothesis was tested and did not survive.** A
+`TurnOffScreen.vbs` launch 100 seconds before the 09:10:39 onset row looked
+like a plausible trigger (a full-screen topmost layered window with
+`WDA_EXCLUDEFROMCAPTURE`, running while CRD is also capturing, would mean dwm
+maintains two composition outputs and computes occlusion for both). Two
+independent tests both went the wrong way: launch proximity in a 30/60/120
+minute window around known bouts is *higher* before onset (1.29–1.35x) than
+after (0.26–0.44x — the opposite of what a causal trigger should show), and
+reconstructing the overlay's on/off state (resolved against event-log
+ambiguity using two independent checks — see history for detail) found the
+overlay makes dwm **cheaper** while active, consistent with "screen off means
+the user is away and there is less to composite", not more expensive.
+[RETRACTED] as a cause. Mechanism-level plausibility plus one time coincidence
+was not enough, and is recorded here as the lesson: a coincidence needs a
+dose-response test, not a story.
+
+## Mechanism: MPO overlay-candidate occlusion walk [MEASURED]
+
+Every frame, dwm walks the composition tree five times — clean, precompute,
+occlusion, overlay-candidate collection, draw — before any GPU work. That is
+the baseline cost of compositing anything and is not itself a finding. What
+turned out to be a finding is that these five walks do **not** grow together.
+
+**The full chain**, confirmed by call-path export against symbolized samples
+(covers 87.9–88.5% of the compositor thread's occlusion-walk time):
+
+```
+MainCompositionThreadLoop -> ProcessComposition -> RenderAndPresent
+  -> CRenderTargetManager::ComputeOverlayConfiguration
+  -> CDDisplayRenderTarget::CollectOverlayCandidates
+  -> CDesktopTree::CalcOcclusionAndCollectOverlayCandidates
+  -> COcclusionContext::Compute
+  -> CVisualTreeIterator::WalkSubtree<COcclusionContext>
+```
+
+This is evaluation of candidates for hardware overlay planes (MPO), not a
+separate code path enabled only when degraded — a healthy capture walks the
+identical chain (91.7% of occlusion-family samples on the overlay path,
+against 91.1–91.2% for two degraded captures; the upstream chain is 100% the
+same). The trigger is not a new path being taken; it is the existing path
+costing more each time it runs.
+
+**Per-frame growth, anchored on `CComposition::PreRender`** (the sole caller
+of `CleanTrees`, called exactly once per composition pass regardless of tree
+size or backlog — this is what makes a per-frame ratio immune to trace length
+and to the fact that automatic captures are threshold-triggered and therefore
+always taken while busy):
+
+| walk | per-frame growth, degraded vs. healthy |
+|---|---|
+| precompute | 13x |
+| drawing | 26x |
+| `CleanTrees` | 35x |
+| **occlusion (the chain above)** | **187x** |
+
+All three of the non-occlusion walks share a common growth factor of
+13–35x — call it what it is: real, and unexplained, and not yet
+investigated on its own. Occlusion sits on top of that common factor with a
+further, specific **~14x** excess. Frame rate itself does not collapse in the
+same window (anchored samples/sec differs by under 2x across six captures,
+consistent with the sampler's own `pass_per_s` reading of 90–144), so this is
+a per-frame cost increase, not fewer frames being rendered more expensively
+overall.
+
+**This does not, on its own, distinguish more nodes from costlier nodes.**
+Per-node work in the occlusion family got proportionally *cheaper*
+(4.12 -> 1.6, an iterator/node-work ratio) across the same comparison. That is
+consistent with pruning failure (many cheap, trivial nodes now being visited,
+diluting the average) but iterator slowdown predicts the same ratio drop by a
+different route (a fixed per-node cost against a growing shared component).
+The two hypotheses' predictions for how much per-node work should grow do
+diverge — pruning failure predicts it tracks the walk's own 187x, iterator
+slowdown predicts it only tracks the shared 13–35x — and the measured value,
+74x, sits **between** the two, which confirms neither. Functions that scale
+with visited-node-count under both hypotheses alike (`RequiresExternalLayer`,
+`GetEffectAlpha`) cannot be used as pruning-failure evidence, because both
+hypotheses predict the same behaviour from them. Separating the two
+mechanisms from call paths alone would need the visual tree's node count at
+the moment of degradation, which is not obtainable from a dump: Microsoft's
+public symbols for `dwmcore.dll` carry function names, not type layout, so
+`CVisualTree` cannot be walked. This is why the discriminator moved to
+hardware performance counters — see the next section.
+
+**Chrome Remote Desktop's cost is now mechanistically located, and it is
+constant, not cumulative.** `CDDARenderTarget` — the Desktop Duplication
+API's render target, used for screen capture / remote sessions — appears in
+the occlusion call path **only** when CRD is connected: 0% of occlusion-family
+samples in three crd=0 captures (two healthy, one degraded), 35.0–41.3% in the
+two crd=1 captures (one healthy, one degraded). Per-frame, occlusion work at
+crd=0 is 0.55; at crd=1 it is 0.61 (overlay) + 0.49 (DDA) = 1.10 — CRD roughly
+**doubles** the per-frame occlusion cost by running a second render target's
+own dirty-region and occlusion pass. This fully explains an earlier +6.87
+percentage-point CRD confound and is why every comparison in this document and
+in the PMC section below states whether CRD was connected. It does **not**
+explain the 2026-08-10 onset: the cost is present at both onset states and
+does not accumulate with uptime.
+
+## PMC: instructions-per-cycle as a discriminator
+
+**The gap this fills:** the call-path evidence above narrows the question to
+"pruning failure vs. iterator slowdown" but cannot close it, because both
+hypotheses predict the same call-path behaviour and neither is obtainable
+from a dump (public symbols carry no type layout). What differs between them
+is hardware-counter behaviour: pruning failure means the CPU is doing
+proportionally more of the *same* work (instructions and cycles both rise,
+IPC roughly flat); iterator slowdown means it is doing the *same* work more
+expensively, typically stalling on memory (instructions flat, cycles spike,
+IPC collapses).
+
+**Tooling** (`watch/dwm-pmc.wprp`, `dwm-pmc-verify.ps1`,
+`dwm-pmc-occlusion.ps1` — see [README](../README.md) for setup). PMC is
+attached to `CSwitch` events rather than `SampledProfile`, because
+TraceProcessor's scriptable API (`Microsoft.Windows.EventTracing.Cpu`) only
+exposes counter data at that attachment point; the same trace still collects
+sampled-profile stacks, which is what makes occlusion-specific apportioning
+possible without a second, differently-sampled export.
+
+**Why IPC and not instructions-per-frame.** An instructions/frame ratio would
+divide a complete `CSwitch`-delta count by a `PreRender`-anchored sample
+count from a *different* trace export — two different sample-availability
+bases, and cross-export ratios of that shape are exactly the failure mode
+this repo's short-window-transient lessons warn about: their scale drifts
+with trace length and with event loss in a way that is easy to misread as a
+real effect. IPC's numerator and denominator are both drawn from the same
+`CSwitch` deltas, the same thread, the same trace — no cross-export division.
+One bias direction still has to be checked before trusting either number:
+`CSwitch` volume is far larger than `SampledProfile`, lost events subtract
+silently from the instruction count, and the busier (degraded) trace loses
+more of them — which would manufacture "instructions did not rise" and
+falsely support iterator slowdown. `dwm-pmc-verify.ps1` prints lost-event
+count first for exactly this reason.
+
+**First real trigger, 2026-08-13 [MEASURED].** A sustained escalation (not a
+transient spike) tripped the `p90` signal. Whole compositor-thread IPC,
+compared against a same-CRD-state (`crd=1`, connected throughout both
+captures) reference: **1.453 -> 1.383** (down 4.8%, not a collapse); LLC
+misses per 1000 instructions **8.462 -> 11.909** (up 41%); compositor thread's
+share of dwm CPU **3.9% -> 14.5%**. A small IPC drop rather than a collapse
+leans toward pruning failure, but this number is a whole-thread aggregate —
+occlusion is only part of what that thread does, so the result could be
+diluted by everything else running on it.
+
+**Narrowing to occlusion specifically, same day [MEASURED].** `CSwitch` PMC
+deltas and `SampledProfile` stacks come from the same trace already, so each
+PMC interval's instructions/cycles can be apportioned between "occlusion" and
+"everything else" by which call-path samples land inside it —
+`dwm-pmc-occlusion.ps1` does this without a second export. Comparing a
+healthy and a degraded capture, both with CRD connected throughout:
+
+| | healthy | degraded | change |
+|---|---|---|---|
+| compositor-thread samples classified occlusion | 6.4% (n=129/2020) | **37.6%** (n=7104/18887) | **~6x** |
+| occlusion-specific IPC | 1.359 | 1.330 | −2.1% |
+| non-occlusion IPC | 1.482 | 1.418 | −4.3% |
+
+The occlusion-specific IPC drop (−2.1%) is smaller than the non-occlusion
+drop, not larger — the opposite of what iterator slowdown predicts. The
+sample share tells the sharper story: the fraction of compositor-thread time
+spent inside occlusion-family functions grew roughly sixfold. Pruning failure
+predicts exactly this combination — the walk visits far more, the visiting
+itself stays about as efficient. Iterator slowdown predicts the opposite
+combination — share roughly unchanged, IPC collapsing. The measured
+combination points at pruning failure.
+
+**This is evidence, not closure. [INFERRED], stated plainly:**
+
+- The healthy side has 129 occlusion samples against 7,104 on the degraded
+  side — a wide confidence interval on the healthy IPC figure. That imbalance
+  is arguably part of what needs explaining (degradation concentrates
+  sampling into occlusion by construction), not pure noise, but it has not
+  been treated as anything more than a caveat here.
+- 24–28% of PMC intervals in both captures had zero samples land inside them
+  and were skipped rather than apportioned (printed by the script, not
+  silently dropped) — whether that skipped fraction is biased in either
+  direction has not been checked.
+- Classification uses only the leaf stack frame, the same simplification used
+  everywhere else in this investigation's call-path tooling: a sample
+  mid-chain through occlusion but leaf-deep in something unrelated (e.g. an
+  allocator) is counted as non-occlusion.
+- This is a single real trigger, and it hit the `p90` signal, not the more
+  severe `cost` signal — weaker than the heaviest of the five original
+  call-path captures. No second real trigger has been compared yet.
+
+**Next step, not yet done:** a second real threshold trigger, ideally at
+`cost` severity, run through the same occlusion-apportioning comparison to
+see whether the direction replicates.
+
 ## Retracted claims
 
 Kept deliberately. Every one of these was stated with more confidence than the
@@ -377,9 +647,20 @@ revisited before any bug report is filed.
 
 ## Open questions
 
-1. Does a second degraded capture reproduce `CleanTrees`? — waiting on the trap.
-2. Does the handle curve saturate below 2400? — see above.
-3. Is this specific to this hardware, this Intel driver, or general to Windows
+1. **Pruning failure or iterator slowdown?** Current PMC evidence (one real
+   trigger) leans pruning failure — see
+   [PMC: instructions-per-cycle as a discriminator](#pmc-instructions-per-cycle-as-a-discriminator).
+   Needs a second real trigger, ideally at `cost` severity, to see whether the
+   direction replicates.
+2. **What drives the shared 13–35x growth common to all five per-frame
+   walks**, independent of occlusion's further ~14x excess? Identified, not
+   investigated.
+3. **What triggers the 2026-08-10 09:10 onset itself?** Uptime gates whether
+   the failure mode is reachable (weak predictor, spearman 0.245) but is not
+   the mechanism. Not investigated.
+4. Does the handle curve saturate below 2400? — see
+   [Recalibrating the trap](#recalibrating-the-trap-2026-08-08-measured).
+5. Is this specific to this hardware, this Intel driver, or general to Windows
    11 build 26200? Untested. One machine, one GPU vendor.
-4. Has this already been reported upstream? **Not yet searched.** This must
+6. Has this already been reported upstream? **Not yet searched.** This must
    happen before any bug report, and before treating any of this as novel.

@@ -1,0 +1,111 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Attaches hardware performance counters to context-switch events, to tell
+  apart two mechanisms behind a slow occlusion walk. Neither requires the
+  visual tree's node count, which is the one thing this toolchain cannot get
+  (the public symbols for dwmcore.dll carry function names, not type layout,
+  so a dump cannot be walked to count tree nodes).
+
+    Pruning failure  (the walk visits more nodes)      -> instruction count
+                                                           rises roughly in
+                                                           step with cycles;
+                                                           IPC stays flat
+    Iterator slowdown (same node count, each node costs
+                        more -- e.g. pointer-chasing on
+                        a larger heap)                  -> instruction count
+                                                           stays flat while
+                                                           cycles spike; IPC
+                                                           collapses
+
+  Why this hangs counters on CSwitch and not SampledProfile: TraceProcessor
+  1.12's scriptable API (Microsoft.Windows.EventTracing.Cpu) only exposes PMC
+  data attached to context-switch events (IProcessorCounterContextSwitchDelta).
+  Counters attached to sampled-profile events are readable in the WPA GUI but
+  not through the scriptable API. The cost is granularity: this only resolves
+  to thread level, not call path. In the degraded state that is less of a loss
+  than it sounds -- about 88% of the compositor thread's samples land inside
+  the occlusion walk, so thread-level IPC is already dominated by it. (A
+  second script, dwm-pmc-occlusion.ps1, apportions PMC deltas by concurrent
+  sampled-profile stacks from the same trace to get occlusion-specific IPC
+  without this limitation -- see that script's header.)
+
+  Two profiles differ only in whether LLCMisses is included. General-purpose
+  PMC slots are limited on Intel silicon, and a hybrid P/E-core layout makes
+  programming the counters more likely to fail. If Full does not start, fall
+  back to Basic -- IPC alone is enough to discriminate the two hypotheses,
+  LLCMisses is corroborating evidence only.
+-->
+<WindowsPerformanceRecorder Version="1.0" Author="dwm degradation investigation">
+  <Profiles>
+
+    <SystemCollector Id="SysCollector_DwmPmc" Name="NT Kernel Logger">
+      <BufferSize Value="1024"/>
+      <Buffers Value="256"/>
+    </SystemCollector>
+
+    <SystemProvider Id="SysProvider_DwmPmc">
+      <Keywords>
+        <Keyword Value="ProcessThread"/>
+        <Keyword Value="Loader"/>
+        <Keyword Value="SampledProfile"/>
+        <Keyword Value="CSwitch"/>
+      </Keywords>
+      <Stacks>
+        <Stack Value="SampledProfile"/>
+      </Stacks>
+    </SystemProvider>
+
+    <!-- Strict="true": if the counters cannot be programmed, wpr -start fails
+         immediately instead of silently recording an empty set. Silent means
+         the gap is discovered only after the capture is done -- and "done"
+         is exactly the moment of degradation, which cannot be reproduced on
+         demand. -->
+    <HardwareCounter Id="HwCounter_Basic" Strict="true">
+      <Counters>
+        <Counter Value="InstructionRetired"/>
+        <Counter Value="TotalCycles"/>
+      </Counters>
+      <Events>
+        <Event Value="CSwitch"/>
+      </Events>
+    </HardwareCounter>
+
+    <HardwareCounter Id="HwCounter_Full" Strict="true">
+      <Counters>
+        <Counter Value="InstructionRetired"/>
+        <Counter Value="TotalCycles"/>
+        <Counter Value="LLCMisses"/>
+      </Counters>
+      <Events>
+        <Event Value="CSwitch"/>
+      </Events>
+    </HardwareCounter>
+
+    <Profile Id="DwmPmcBasic.Verbose.File" Name="DwmPmcBasic" Description="dwm walk: instructions vs cycles"
+             LoggingMode="File" DetailLevel="Verbose">
+      <Collectors>
+        <SystemCollectorId Value="SysCollector_DwmPmc">
+          <SystemProviderId Value="SysProvider_DwmPmc"/>
+          <HardwareCounterId Value="HwCounter_Basic"/>
+        </SystemCollectorId>
+      </Collectors>
+    </Profile>
+
+    <Profile Id="DwmPmcBasic.Light.File" Name="DwmPmcBasic" Description="dwm walk: instructions vs cycles"
+             LoggingMode="File" DetailLevel="Light" Base="DwmPmcBasic.Verbose.File"/>
+
+    <Profile Id="DwmPmcFull.Verbose.File" Name="DwmPmcFull" Description="dwm walk: instructions vs cycles vs LLC misses"
+             LoggingMode="File" DetailLevel="Verbose">
+      <Collectors>
+        <SystemCollectorId Value="SysCollector_DwmPmc">
+          <SystemProviderId Value="SysProvider_DwmPmc"/>
+          <HardwareCounterId Value="HwCounter_Full"/>
+        </SystemCollectorId>
+      </Collectors>
+    </Profile>
+
+    <Profile Id="DwmPmcFull.Light.File" Name="DwmPmcFull" Description="dwm walk: instructions vs cycles vs LLC misses"
+             LoggingMode="File" DetailLevel="Light" Base="DwmPmcFull.Verbose.File"/>
+
+  </Profiles>
+</WindowsPerformanceRecorder>

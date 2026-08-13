@@ -19,3 +19,10 @@ dwm-capture/
 dwm-growth.csv
 dwm-growth-trigger.log
 *.flag
+
+# TraceProcessor SDK binaries (Microsoft.Windows.EventTracing*.dll) that
+# dwm-pmc-verify.ps1 / dwm-pmc-occlusion.ps1 load from -TraceProcessorLibDir.
+# Third-party NuGet output, not source -- fetch it per README rather than
+# committing it.
+watch/lib/
+

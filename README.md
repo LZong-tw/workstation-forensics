@@ -97,10 +97,45 @@ not be presented as if they do.
 ```
 watch/
   dwm-growth-sample.ps1        one-shot sampler, 22 columns to CSV
-  dwm-autocapture.ps1          full dump + symbolized stacks + 30 s ETL
+  dwm-autocapture.ps1          full dump + symbolized stacks + 30 s ETL (+ PMC, see below)
   dwm-setup-elevated-task.ps1  registers the scheduled task at RunLevel Highest
+  dwm-pmc.wprp                 WPR profile: hardware PMC on CSwitch, alongside CPU/DesktopComposition/GPU
+  dwm-pmc-probe.ps1            one-shot feasibility check that a given machine can program the counters
+  dwm-pmc-baseline.ps1         dedicated healthy-state PMC capture, brackets the recording with CSV checks
+  dwm-pmc-verify.ps1           reads an ETL, reports instructions/cycles/IPC per dwm.exe thread
+  dwm-pmc-occlusion.ps1        apportions PMC by concurrent sampled-profile stacks -> occlusion-specific IPC
 task-*.vbs (generated)         dedicated wscript launchers (no console flash)
 ```
+
+### PMC: telling pruning failure apart from iterator slowdown
+
+Two mechanisms produce the same symptom (a slower per-frame occlusion walk)
+but predict different hardware counter behaviour:
+
+| | instructions | cycles | IPC |
+|---|---|---|---|
+| pruning failure (more nodes visited) | rises with cycles | rises | flat |
+| iterator slowdown (same nodes, memory-latency bound) | flat | spikes | collapses |
+
+`dwm-pmc.wprp` hangs `InstructionRetired`/`TotalCycles`/`LLCMisses` on
+context-switch events (the only place TraceProcessor's scriptable API exposes
+PMC data), and `dwm-pmc-verify.ps1` reports IPC per thread from that. Because
+the same trace also collects sampled-profile stacks, `dwm-pmc-occlusion.ps1`
+goes one step further and apportions each PMC interval's instructions/cycles
+between "occlusion walk" and "everything else" by which call-path samples
+land inside it, producing an occlusion-specific IPC rather than a
+whole-thread average.
+
+**Setup:** these two scripts load the TraceProcessor SDK
+(`Microsoft.Windows.EventTracing*.dll`) via `-TraceProcessorLibDir` (defaults
+to a `lib/` folder next to the script, gitignored). Get the DLLs from the
+`Microsoft.Windows.EventTracing.Processing.All` NuGet package's
+`lib/netstandard2.0/` folder.
+
+Findings so far are in
+[`docs/dwm-investigation.md`](docs/dwm-investigation.md) under "PMC:
+instructions-per-cycle as a discriminator" — leaning toward pruning failure,
+not yet closed on a single sample.
 
 Setup is one elevated run of `dwm-setup-elevated-task.ps1`. Because the task
 runs at `RunLevel Highest`, it never raises a UAC prompt afterwards — capture
@@ -112,10 +147,15 @@ Task Scheduler mangles multi-argument `wscript` command lines.
 
 See [`docs/dwm-investigation.md`](docs/dwm-investigation.md).
 
-Status as of 2026-08-08: **open.** A root-cause function has been identified
-from a single degraded observation plus a single healthy control. The trap that
-would produce a second degraded sample is armed and has not yet fired. Read the
-document's confidence markers before relying on anything in it.
+Status as of 2026-08-13: **open.** The trap has since fired repeatedly. The
+mechanism is localized to a specific per-frame walk (hardware-overlay
+candidate evaluation, ~187x growth vs. 13–35x for the rest of the composition
+pipeline); what remains open is which of two causes drives that growth, and a
+PMC-based discriminator built to answer that currently leans one way on a
+single real trigger. Read the document's confidence markers before relying on
+anything in it — several early claims here, including "gradual degradation
+over days", turned out to be wrong and are marked as retracted rather than
+removed.
 
 The thresholds were recalibrated on 2026-08-08 against 396 healthy samples,
 because the original was set from 71 and had drifted *inside* the healthy
