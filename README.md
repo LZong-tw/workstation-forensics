@@ -224,6 +224,15 @@ Records CPU delta / private / working set / handles / threads per process,
 per-core frequency, memory and paging counters, GPU engine use, per-process
 I/O, DWM composition rate, and recent error events.
 
+### Logged occurrences
+
+[`docs/slow-moment-log.md`](docs/slow-moment-log.md) is a running log of
+subjective slowness reports, most without a hotkey capture to back them
+(pressing the hotkey *during* the episode is what makes a report checkable —
+an after-the-fact check can rule out known causes but not see a transient
+stall). Kept so a pattern across occurrences can emerge instead of each
+report being checked once and forgotten.
+
 ### Why a hotkey here, when the DWM watcher had to be fully automatic
 
 The DWM trap could not use a human trigger, because the human's reaction —
