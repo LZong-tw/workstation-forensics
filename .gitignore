@@ -18,6 +18,8 @@ dwm-capture/
 # Local instrument state
 dwm-growth.csv
 dwm-growth-trigger.log
+ui-response.csv
+task-*.vbs
 *.flag
 
 # TraceProcessor SDK binaries (Microsoft.Windows.EventTracing*.dll) that

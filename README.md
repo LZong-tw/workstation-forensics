@@ -286,6 +286,75 @@ Measure it first, then decide whether the standing cost is worth the history.
 
 ---
 
+## Part 4 — UI responsiveness logger
+
+```
+watch/
+  ui-response-log.ps1         continuous logger, one summary row per 30 s window
+  ui-response-setup-task.ps1  registers it to start at logon (no elevation needed)
+```
+
+For "typing feels laggy" — the class of complaint the DWM trap does *not*
+cover, because it measures composition-pass timing, not input responsiveness.
+
+Probes the foreground window with `SendMessageTimeout(WM_NULL)` every 500 ms
+and writes percentiles of each 30-second window to `ui-response.csv`. `WM_NULL`
+performs no operation; this is the documented way to ask whether a window's
+thread is pumping messages, and is what underlies Windows' own "Not
+Responding" detection. A blocked or slow message pump is the most common
+mechanism behind laggy typing, so it is the cheapest proxy plausibly on the
+causal path — but it is a proxy, not keystroke-to-pixel latency, and a stall
+it does not see is not evidence that nothing stalled.
+
+```powershell
+.\watch\ui-response-setup-task.ps1     # once, unelevated
+Start-ScheduledTask -TaskName "UI Response Logger"
+```
+
+### Why a logger and not a trap
+
+The obvious question is why this cannot fire automatically the way the DWM
+trap does. It is not that the trap is harder to write — it is that a
+threshold needs two things this symptom does not yet have.
+
+The DWM trap could be calibrated because an ad-hoc capture first established
+what degradation looks like (composition rate 144 → 45/s, `p50` leaving its
+vsync-pinned 6.94 ms), and the sampler then supplied a healthy distribution
+tight enough that a threshold fits between them — `p50` never exceeded 7.18
+across 396 healthy samples. Typing lag has neither end: it has never once
+been measured while happening, so there is nothing to place a threshold
+against, and "slow" is multi-causal in a way a single vsync-pinned constant
+is not.
+
+The cost of guessing is also asymmetric. `Fire()` writes a per-pid flag and
+returns early for the rest of that process's life, so one false fire disarms
+the signal for the cycle it was meant to catch — this repo has already shipped
+one threshold that sat inside the healthy distribution and escaped firing
+only because no two crossings were adjacent.
+
+A logger has neither problem: no threshold, so it cannot false-fire and
+cannot disarm itself. And the DWM investigation's own history says this is
+the right order anyway — 545 logged rows are what overturned its "gradual
+degradation" framing, well before any of it was understood.
+
+### Cost, measured before committing to run it
+
+Per this repo's rule that instruments must not perturb what they measure, the
+probe loop was measured before being made permanent: **0.31% of one core and
+~82 MB working set** at a 500 ms probe interval. Probe latency while healthy,
+over 118 probes: p50 0.305 ms, p90 0.923 ms, p99 7.369 ms, max 19.284 ms.
+
+**Note that tail.** The median is sub-millisecond but the healthy p99 is
+already 7 ms and the max 19 ms. Any threshold built on this later has to be
+calibrated against the tail, not the median — judging by the median while
+ignoring the tail is exactly how this repo's first DWM threshold ended up
+inside the healthy distribution.
+
+Findings are logged in
+[`docs/slow-moment-log.md`](docs/slow-moment-log.md).
+
+---
+
 ## Notes
 
 Everything here is read-only with respect to system state. Nothing changes dump

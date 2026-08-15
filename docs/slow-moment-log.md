@@ -48,3 +48,44 @@ input-to-screen latency.
 *while it is happening*. An after-the-fact CPU snapshot cannot see a
 transient stall, only a sustained one — this entry is exactly the kind of gap
 that leaves.
+
+**Follow-up, same day: a logger now covers this gap.** Relying on the hotkey
+means relying on the user noticing, reacting, and remembering — which did not
+happen here. `watch/ui-response-log.ps1` (README Part 4) now runs
+continuously and records foreground-UI message-pump responsiveness, so the
+next report of this kind has data behind it whether or not anything was
+pressed at the time.
+
+### First observations from the logger [MEASURED]
+
+The logger's first four windows, taken during a 2-minute validation run on
+2026-08-16, immediately showed a spread far wider than the 60-second cost
+measurement had:
+
+| window | p50 | p90 | max | foreground | cpu% |
+|---|---|---|---|---|---|
+| 01:36:04 | 0.266 | 6.894 | **106.617** | LINE | 44.7 |
+| 01:36:35 | 0.269 | 0.763 | **613.330** | LINE | 37.9 |
+| 01:37:05 | 0.240 | 0.595 | 0.819 | WindowsTerminal | 43.0 |
+| 01:37:35 | 0.207 | 1.124 | 4.096 | WindowsTerminal | 43.6 |
+
+Two consecutive windows with LINE in the foreground each contain a single
+probe that took 107 ms and 613 ms respectively, against a median of 0.27 ms.
+A 613 ms message-pump stall is well above the threshold of human perception
+for typing feedback. Switching foreground to WindowsTerminal, the maximum
+drops back to sub-millisecond and single-digit-millisecond.
+
+**What this does and does not establish. [ASSUMPTION]** It establishes that
+the instrument resolves stalls of this size, which the 60-second cost run
+(max 19 ms) had not shown. It does **not** establish that these stalls are
+the cause of the reported slowness, or that they are abnormal: n=4 windows is
+no baseline, and it is not known whether the user was typing into LINE at the
+time. A stall of this size in a chat client's message pump is also entirely
+consistent with ordinary work — rendering an incoming message, decoding an
+image — rather than with a fault.
+
+The point of recording it is that this is now a checkable claim rather than a
+feeling: if LINE-foreground windows keep producing hundred-millisecond
+maxima while other applications do not, that is a pattern; if they do not
+recur, this entry stands as a single unexplained sample and should be treated
+that way.
