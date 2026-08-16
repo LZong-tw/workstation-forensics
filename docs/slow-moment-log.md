@@ -89,3 +89,72 @@ feeling: if LINE-foreground windows keep producing hundred-millisecond
 maxima while other applications do not, that is a pattern; if they do not
 recur, this entry stands as a single unexplained sample and should be treated
 that way.
+
+### 2026-08-16, second report the same day [MEASURED]
+
+The first report backed by twelve hours of logger data (1461 windows). This
+entry is what the logger was built for, and it changed the answer: the
+previous entry could only rule things out, this one identifies a cause.
+
+**Stalls are not uniform across the day.** Bucketing every window by
+half-hour:
+
+| period | windows with max > 50 ms | worst max |
+|---|---|---|
+| 02:00-09:30 | **0 of ~900** | 3.1 ms |
+| 10:00 onward | frequent | — |
+| 13:00-13:30 | **20 of 60** (8 > 200 ms, 3 > 1000 ms) | **2469 ms** |
+
+11:30-12:30 was clean with the *same* foreground application
+(WindowsTerminal) that was in the foreground during the bad 13:00 bucket, so
+the stalls are not a property of one application.
+
+**Stalls track CPU contention. [MEASURED]** Windows containing a stall
+> 50 ms had `cpu_pct` median 50.2 / p90 87.4; windows without had median
+21.5 / p90 38.4. This is a system-wide contention signature, not an
+application fault.
+
+**Root cause: a superseded Serena HTTP singleton was never reaped.
+[MEASURED]** `~/.serena/http-singleton/` runs one HTTP Serena per project on
+a fixed port (`ports.json`: `C:\dev\sugar-dating` -> 9127). Three separate
+generations of that singleton were found alive simultaneously, aged 209 h,
+76.7 h and 48.2 h. Each roots in a `node.exe` whose own parent PID no longer
+exists — the immediate parents are alive, so a one-level "is my parent alive"
+check does not detect this; the ancestry has to be walked to the top:
+
+```
+tsserver <- node <- cmd.exe <- python <- python <- serena.exe <- uv <- uvx <- node <- DEAD(28432)
+```
+
+The 209 h generation **no longer holds the 9127 listener** — the newest
+generation took it over — but it never exited, and it retains four
+established sockets. Its `tsserver.js` for `sugar-dating` (pid 50388,
+345 MB) has consumed **108.6 CPU-hours over 172 hours of life = 63.1% of one
+core, sustained, for seven days.**
+
+Standing cost of all three orphaned cohorts together: **27 processes,
+572 MB resident, 113.5 CPU-hours burned.**
+
+**What this does NOT establish, stated explicitly. [MEASURED negative]** The
+orphan is *not sufficient* on its own. Because its 63.1% is a lifetime
+average over the full 172 hours, it was burning exactly as much during the
+02:00-09:30 window that had **zero** stalls. It is chronic headroom loss, not
+a trigger: it removes most of a core permanently, so stalls appear once the
+user's own activity is added on top. Killing it should reduce stall frequency
+but is not predicted to eliminate stalls.
+
+**Disclosure: the investigation is part of the load.** `claude.exe` pid 56620
+— this session — has averaged 67.6% of a core over 183 hours (123.7
+CPU-hours), making it the single largest consumer on the machine, slightly
+ahead of the orphan. Any measurement of "what is loading this machine" taken
+during this investigation includes the investigation. `Rize.exe` is a distant
+third at 14.4%.
+
+Prior art: the same project (`sugar-dating`) already has a recorded orphaned
+`next` dev-server leak with the same shape — parent dies, child is never
+reaped. This is a recurring failure mode of that toolchain, not a one-off.
+
+**Open follow-up:** the singleton launcher supersedes an existing instance
+without terminating it. Until that is fixed, orphan generations will keep
+accumulating. Re-check the logger buckets after the orphans are cleared to
+test the "reduced but not eliminated" prediction above.
