@@ -305,3 +305,28 @@ existed and was executing the older code. This is the same property that made
 `reap` the primary defence, and it nearly produced a second "verified" claim
 about code that had never run. Confirmed only after a further restart:
 `starting: false`, daemon on final code.
+
+#### Closing state [MEASURED]
+
+Both singletons (`sugar-dating` on 9127, `sugar-wt-auditroot` on 18291) were
+restarted onto the patched launcher — 32.3 s and 18.3 s, both exit 0. Final
+counts against what was found at the start of this entry:
+
+| | before | after |
+|---|---|---|
+| `serena.exe` instances | 3 (two superseded) | 2, one per live port |
+| singleton daemons | 3 | 2, both ancestors of their listener |
+| `tsserver` instances | 6 | 2 |
+| worst `tsserver` | 108.9 CPU-h, 954 MB | 0.00 CPU-h, 76 MB |
+| `reap --dry-run` | — | `wouldKill: []` on both ports |
+
+A final incidental confirmation of the over-matching bug: a process listing
+taken during this sweep showed a `pwsh.exe` whose own command line contained
+`serena-http-singleton.mjs ... daemon ... --port 9127`, because it was the
+diagnostic command being run. Under the substring matcher that shell would
+have been selected for killing. Under the argv-position matcher only the two
+genuine daemons appear.
+
+The prediction to test from here is unchanged and still open: stall frequency
+should fall, but stalls should not disappear, because the reclaimed core was
+chronic load rather than the trigger.
