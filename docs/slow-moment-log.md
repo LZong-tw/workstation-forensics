@@ -216,3 +216,64 @@ produce.
 Verified in both directions with `reap --dry-run`: the live daemon (79044,
 ancestor of listener 49652) is kept, and a decoy process matching the daemon
 command-line pattern but not owning the listener is flagged.
+
+#### The first verification was invalid [RETRACTED]
+
+**[RETRACTED] "a decoy process matching the daemon command-line pattern ...
+is flagged" was not the test it appeared to be.** The decoy was
+`node decoy.js serena-http-singleton.mjs daemon --port 9127`. That does not
+resemble a daemon; it resembles *any command that merely mentions the
+launcher*. The first `reap` selected daemons by substring — file name present,
+the word `daemon` present, `--port 9127` present — so the decoy proved only
+that reap kills things matching a pattern that also matches innocent
+processes. It confirmed the bug rather than the fix.
+
+This surfaced because a later dry-run listed a pid as not owning the listener
+yet did not select it for killing. The pid was a transient `pwsh.exe` running
+a diagnostic command whose own arguments contained the script path. It was
+spared only because it happened to be an ancestor of the reap process and hit
+an unrelated guard — luck, not design. A diagnostic shell run from anywhere
+else would have been killed.
+
+Selection now matches by argv **position**, not substring: the process must be
+`node`, its argv[1] must be this script, argv[2] must be `daemon`, and a
+`--port` argument must equal the port. Retested with two decoys at once — one
+reproducing a real daemon's file name and argv shape, one merely mentioning
+the script. The first is killed, the second is not selected at all, and the
+live daemon and listener are untouched.
+
+The general lesson is about instrument validation, which this repo already
+insists on for measurement and should equally for remediation: a decoy that
+does not resemble the target validates the wrong thing, and a passing test
+against it is worse than no test, because it converts an unverified change
+into an apparently verified one.
+
+#### Second defect, found by restarting onto the patched code [MEASURED]
+
+Restarting the 9127 singleton exposed a pre-existing startup race, unrelated
+to the changes above and untouched by them. `WATCHDOG_FAILURES` is 3 at
+`WATCHDOG_INTERVAL_MS` 15000, so the watchdog gives serena 45 s to answer,
+but a cold `uvx --from serena-agent@latest` start exceeds that. The observed
+sequence:
+
+```
+07:41:00 spawned daemon pid=18452
+07:41:15 watchdog failure 1/3: ECONNREFUSED
+07:41:30 watchdog failure 2/3: ECONNREFUSED
+07:41:45 watchdog failure 3/3: ECONNREFUSED
+07:41:45 watchdog restarting serena pid=86568      <- killed while still starting
+07:41:51 starting uvx ...                          <- second attempt
+07:42:39 healthy, mcp:200
+```
+
+The watchdog kills serena before it has finished starting, and the endpoint
+only comes up on a later attempt that wins the race. `ensure`'s own 60 s
+timeout expires first, so `restart` exits non-zero even though the daemon
+recovers ~110 s in. On this occasion it self-recovered and the endpoint is
+healthy; a real MCP session start on a cold cache would have seen `ensure`
+throw.
+
+Not fixed — the sensible fix is a startup grace period before the watchdog
+begins counting, but the right value is a judgement call about how long
+serena should be allowed to start. Recorded here rather than patched
+silently.
