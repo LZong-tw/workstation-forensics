@@ -471,8 +471,37 @@ saturating the file-sharing server degrades anything crossing the WSL
 boundary, in either direction — but it is not the cause of the stall episodes
 documented earlier, and should not be credited with them.
 
-**Proposed fix, not applied** (it changes a system config file, which is the
-user's call): add `/mnt` to `PRUNEPATHS`, and `9p` and `drvfs` to `PRUNEFS`,
-in `/etc/updatedb.conf`. Indexing the Windows drives from inside Linux has
-little value — the same files are indexed by Windows Search — and it is the
-entire cost here.
+**Fix applied** (user's decision): `/mnt` added to `PRUNEPATHS`, `9p` and
+`drvfs` added to `PRUNEFS` in `/etc/updatedb.conf`, backed up first to
+`/etc/updatedb.conf.bak-20260817-014110`. The edit was made by a script that
+refuses to write if any pre-existing value or unrelated key changed, and is
+idempotent on a second run. Indexing the Windows drives from inside Linux has
+little value — the same files are already indexed by Windows Search — and it
+was the entire cost here.
+
+**The config change does not affect the run already in progress**, which read
+`updatedb.conf` at 00:30 and would have continued for another one to three
+hours. This is the third instance in two days of the same trap: a running
+process carries the configuration or code it started with. It was stopped
+with `systemctl stop`.
+
+**Causal confirmation. [MEASURED]** Stopping it converts the attribution from
+correlation into a controlled test, and the result is unambiguous:
+
+| `dllhost` / Plan9FileSystem | window 1 | window 2 | window 3 |
+|---|---|---|---|
+| with `updatedb` running | 36.2% | 38.1% | — |
+| after `systemctl stop` | **0.0%** | **0.0%** | **0.0%** |
+
+Not a reduction — a collapse to zero across three consecutive 15-second
+windows. `updatedb` accounted for the entire Plan9FileSystem load, not merely
+part of it.
+
+The aborted run's own accounting agrees with the mechanism: **5 min 17 s of
+CPU over 1 h 27 m of wall clock**, the same ~95%-blocked ratio seen in the
+three completed runs.
+
+**What it did not fix:** memory is unchanged at 89.6% used (3.2 GB free); the
+job's peak was only 356 MB this run, so it was never the memory driver. The
+timer remains enabled, so tomorrow's 00:30 run is the test of whether the
+pruning works — it should finish in seconds rather than hours.
