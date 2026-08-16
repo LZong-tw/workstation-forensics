@@ -158,3 +158,61 @@ reaped. This is a recurring failure mode of that toolchain, not a one-off.
 without terminating it. Until that is fixed, orphan generations will keep
 accumulating. Re-check the logger buckets after the orphans are cleared to
 test the "reduced but not eliminated" prediction above.
+
+#### Correction, after reading the launcher source [RETRACTED in part]
+
+The two claims above about *mechanism* were written before
+`~/.serena/http-singleton/serena-http-singleton.mjs` had been read, and both
+are wrong. The measurements are unaffected; the diagnosis is not.
+
+**[RETRACTED] "Each roots in a `node.exe` whose own parent PID no longer
+exists" was presented as the anomaly.** It is not an anomaly. `spawnDaemon()`
+starts the daemon with `detached: true` followed by `child.unref()`, so the
+spawning `ensure` process exits immediately by design and *every* healthy
+daemon has a dead root — including the two kept. A dead root is the designed
+steady state here and is not evidence of anything. The full ancestry walk was
+still the right tool, but for a different reason: it identifies which daemon
+owns the listener, not which one is orphaned.
+
+**[RETRACTED] "Root cause: a superseded singleton was never reaped."** That
+is the symptom. The cause is in `watchdog()`: its health check is `probe()`,
+which issues an HTTP request to `endpoint(config)` — a `host:port` URL. It
+tests **the port**, not **its own child**. Once a newer generation binds the
+port, the superseded daemon's probe is answered by the newcomer, `failures`
+resets to 0 on every cycle, and the daemon supervises a child that serves
+nothing for as long as the machine stays up. Nothing ever reaps it because
+nothing ever concludes anything is wrong.
+
+**Supporting evidence for the corrected mechanism. [MEASURED]** The
+generation-1 daemon root was 209 h old while its `serena.exe` was 172 h old.
+The watchdog therefore *did* work once: it detected a genuine failure at the
+172 h mark and restarted its child. It only became blind afterwards, once a
+competing generation existed to answer its probes. Consistent with this, that
+daemon had accumulated just 0.02 CPU-hours across 209 hours — the cost of
+~50,000 successful probes, and a rate only the healthy branch of the loop can
+produce.
+
+**Fix applied** (in `~/.serena/http-singleton/`, not in this repo — per
+`CLAUDE.md` this repo does not carry remediation):
+
+- `reap` command, and it is the *primary* defence rather than the watchdog
+  change. A daemon already running executes the code it was spawned with, so
+  patching the file cannot teach an existing stray to retire; `reap` runs in a
+  fresh short-lived process on every `ensure`, so it always has current code
+  and needs no cooperation from the stray. It kills any daemon supervising the
+  port that is not an ancestor of the process currently holding the listener,
+  and refuses to act at all when no listener exists.
+- `watchdog()` now records which pid holds the listener and retires itself
+  when another generation takes over — secondary hardening only.
+- Kills now verify termination instead of trusting the exit status. This was
+  not theoretical: during this session's manual cleanup, `Stop-Process`
+  reported "killed 13 of 13" while three of those processes were still alive
+  on immediate recheck. A supervisor that kills and returns can leave a
+  half-dead tree with no supervisor — a new orphan class created by the fix.
+- Process ancestry uses one process-table snapshot walked in memory, not a
+  per-pid query per hop, and the expensive scan is kept off the `ensure` fast
+  path (detached, rate-limited).
+
+Verified in both directions with `reap --dry-run`: the live daemon (79044,
+ancestor of listener 49652) is kept, and a decoy process matching the daemon
+command-line pattern but not owning the listener is flagged.
