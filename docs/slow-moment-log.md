@@ -273,7 +273,35 @@ recovers ~110 s in. On this occasion it self-recovered and the endpoint is
 healthy; a real MCP session start on a cold cache would have seen `ensure`
 throw.
 
-Not fixed — the sensible fix is a startup grace period before the watchdog
-begins counting, but the right value is a judgement call about how long
-serena should be allowed to start. Recorded here rather than patched
-silently.
+**Fixed, grace period set to 100 s** (user's call on the value). The watchdog
+now records when the child started and does not count failures until either
+the endpoint has answered once or the grace has elapsed; the grace covers
+startup only, so a failure after the endpoint has ever been healthy still
+counts immediately. Three coupled values had to move with it, or the fix
+would have been defeated elsewhere:
+
+- `DEFAULT_TIMEOUT_MS` 60 s -> 150 s. `ensure` would otherwise still give up
+  before the grace it just granted had expired.
+- The `acquireLock` stale threshold, previously a hardcoded 120 s, is now
+  `DEFAULT_TIMEOUT_MS + 60 s`. At 120 s it would have sat *below* the new
+  ensure timeout, so a second ensure would declare a live lock stale while the
+  first was legitimately waiting for a cold start.
+- The concurrent-ensure wait was capped at `min(timeout, 30 s)`; 30 s is
+  shorter than a cold start, so a waiter gave up on a daemon that was still
+  coming up. Now uses the full timeout.
+
+Verified by restarting: the log shows `still starting (15s of 100s grace)`
+where it previously showed `watchdog failure 1/3`, serena is no longer killed
+mid-startup, and `restart` exits 0 (32.3 s) instead of 1 (66.2 s). Warm
+`ensure` re-measured over five runs at 132-528 ms — the path every MCP session
+start takes is unaffected.
+
+**A second instance of the same trap. [MEASURED]** After adding the fix, the
+state file still reported `starting: true` alongside `healthy: true`
+seventeen seconds later. The fix was not wrong — `writeState` merges over the
+previous file, so the flag needed explicit clearing, but the *reason it was
+still showing* was that the running daemon had been spawned before that line
+existed and was executing the older code. This is the same property that made
+`reap` the primary defence, and it nearly produced a second "verified" claim
+about code that had never run. Confirmed only after a further restart:
+`starting: false`, daemon on final code.
