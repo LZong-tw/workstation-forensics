@@ -375,3 +375,52 @@ launcher with owner detection removed, it reports 6/9 and *times out* on the
 supersede check — no reaction in sixty seconds, which is precisely the
 original symptom. A test that cannot fail against the unfixed code proves
 nothing, and this one does fail.
+
+### 2026-08-17 01:09 [MEASURED]
+
+Reported: slow again. First report where the logger was already running and
+could be consulted immediately.
+
+**The logger does not corroborate the symptom.** Last 60 minutes: 1 window of
+119 with a maximum over 50 ms, worst 106.9 ms, nothing over 200 ms. For
+comparison, yesterday's bad stretch was 8.3% of windows over 50 ms with a
+2468 ms worst. Whatever is being perceived is not showing up as foreground
+message-pump unresponsiveness.
+
+**The machine is nevertheless loaded.** Measured over three consecutive
+20-second windows rather than one short sample, because a single 3-second
+delta cannot separate a spike from a sustained burn:
+
+| pid | process | W1 | W2 | W3 | mean | lifetime avg |
+|---|---|---|---|---|---|---|
+| 56620 | `claude` (this session) | 120.4 | 131.6 | 130.2 | **127.4%** | 69.1% |
+| 29932 | `claude` (a second session) | 89.0 | 127.0 | 62.0 | **92.7%** | **2.7%** |
+| 12164 | `dllhost` / Plan9FileSystem | 48.1 | 47.2 | 44.1 | **46.5%** | 5.5% |
+| 56740 | `Rize` | 46.5 | 38.0 | 33.5 | 39.3% | 14.9% |
+
+Two of these are elevated far above their own long-run baseline: the second
+Claude session (92.7% against a 2.7% lifetime average over 194 h) and the
+`dllhost` hosting `Plan9FileSystem` (`vp9fs.dll`) — the WSL file-sharing
+server — at 46.5% against 5.5%, on an 8 MB working set. Whether the second
+Claude session is doing real work is not determinable from outside the
+process and is an open question for the user.
+
+**Other pressure, checked because the logger cannot see any of it:**
+
+- Memory: 3.5 GB free of 31.2 GB, **88.8% used**; `Pages/sec` 246. This is the
+  tightest resource on the machine. Commit 53.9 GB against a 129.5 GB limit,
+  page file only 6.4% used.
+- Disk: not implicated — 86.9% idle, 1.0 ms average read, 0.1 ms average
+  write, queue length 0.
+- CPU throttling: ruled out. `% Processor Performance` reads **119.6** while
+  `% Processor Utility` is 43.3, i.e. turbo is engaged under real load. (An
+  idle reading here would have had no discriminating power; this one was taken
+  with the machine already busy.)
+
+**The Serena fix held. [MEASURED]** Eight hours after the restarts: two
+`serena.exe`, two singleton daemons, two `tsserver` instances at 41 MB and
+**0.00 CPU-hours** each. No new generation accumulated, which is the first
+production evidence for the reap/supersede work above.
+
+**Still pending:** the clean 10:00–14:27 day-over-day comparison. This report
+came in at 01:09, so that window does not exist yet for 08-17.
