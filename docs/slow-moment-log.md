@@ -424,3 +424,55 @@ production evidence for the reap/supersede work above.
 
 **Still pending:** the clean 10:00–14:27 day-over-day comparison. This report
 came in at 01:09, so that window does not exist yet for 08-17.
+
+#### Traced: a nightly `updatedb` walks the Windows drives over 9P [MEASURED]
+
+The second Claude session was confirmed by the user to be theirs and working,
+so its 92.7% is accounted for. The `Plan9FileSystem` burn was traced instead.
+
+`Plan9FileSystem` (`vp9fs.dll`) is the Windows-side server for WSL file
+sharing. In WSL2 it carries traffic in **both** directions — not only Windows
+reaching `\\wsl$`, but also Linux reaching `/mnt/c`, which is why the load
+appears on the Windows side while the Linux side looks idle.
+
+Inside the Kali distro, `updatedb.plocate` had been running for 58 minutes in
+state **`D`** — uninterruptible I/O wait. `/etc/updatedb.conf` prunes neither
+`/mnt` (not in `PRUNEPATHS`) nor the relevant filesystems (`PRUNEFS` lists
+neither `9p` nor `drvfs`), while `/mnt/c` and `/mnt/d` are both mounted
+`type 9p ... aname=drvfs`. So the nightly index walk traverses the Windows
+drives one 9P round trip at a time.
+
+Direct confirmation rather than inference: the process's `wchan` read
+**`p9_client_rpc`** — the kernel was blocked inside a 9P RPC call at the
+moment of sampling — and its open descriptors included `/mnt/f` among more
+than a hundred directory handles.
+
+**It is not a one-off. It is a systemd timer, and it runs for hours:**
+
+| date | started | finished | wall clock | CPU consumed |
+|---|---|---|---|---|
+| 08-14 | — | 04:45:49 | **4 h 12 m** | 10 m 27 s |
+| 08-15 | 00:36:44 | 04:08:05 | **3 h 31 m** | 10 m 21 s |
+| 08-16 | 00:24:44 | 03:05:32 | **2 h 41 m** | 10 m 03 s |
+| 08-17 | 00:30:44 | still running at 01:29 | — | — |
+
+Ten minutes of CPU spread over three to four hours of wall clock. That ratio —
+roughly 95% of the time blocked — *is* the 9P round-trip cost, and the
+Windows-side share of it is the `dllhost` at 46.5% of a core. Peak memory per
+run is reported at 0.8–1.0 GB, on a machine currently at 88.8% memory used.
+
+**What this does NOT explain, stated because it constrains the finding.
+[MEASURED]** On 08-16 this same job ran from 00:24 to 03:05, and that window
+falls inside the period recorded further up this file as having **zero**
+windows over 50 ms. Tonight's logger is likewise clean. So `updatedb` is a
+large, genuinely recurring consumer that does **not** produce foreground
+message-pump stalls. It is a plausible cause of "the machine feels slow" —
+saturating the file-sharing server degrades anything crossing the WSL
+boundary, in either direction — but it is not the cause of the stall episodes
+documented earlier, and should not be credited with them.
+
+**Proposed fix, not applied** (it changes a system config file, which is the
+user's call): add `/mnt` to `PRUNEPATHS`, and `9p` and `drvfs` to `PRUNEFS`,
+in `/etc/updatedb.conf`. Indexing the Windows drives from inside Linux has
+little value — the same files are indexed by Windows Search — and it is the
+entire cost here.
