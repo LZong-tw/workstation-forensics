@@ -327,6 +327,51 @@ diagnostic command being run. Under the substring matcher that shell would
 have been selected for killing. Under the argv-position matcher only the two
 genuine daemons appear.
 
-The prediction to test from here is unchanged and still open: stall frequency
-should fall, but stalls should not disappear, because the reclaimed core was
-chronic load rather than the trigger.
+#### Prediction tested [MEASURED, attribution not clean]
+
+The kill time was fixed from an independent source — the mtime of the kill
+script, 14:27:23 — rather than chosen by looking at the curve. Raw
+before/after would be dominated by the daily pattern, since the "before" side
+contains the stall-free overnight period, so active hours are compared with
+active hours:
+
+| window | n | max > 50 ms | > 200 ms | > 1 s | cpu median |
+|---|---|---|---|---|---|
+| before, 10:00–14:27 | 528 | 44 (**8.3%**) | 16 (3.0%) | 5 | 36.2 |
+| after, 14:27–18:36 | 495 | 13 (**2.6%**) | 9 (1.8%) | **6** | 23.2 |
+
+Both halves of the prediction hold: frequency fell to about a third, and
+stalls did **not** disappear — the count above one second actually rose by
+one.
+
+**The attribution is not clean, and in both directions.** The cpu median fell
+13 points but the orphan can only account for about 4 (0.63 of a core over 16
+logical cores is 3.9 points); the remainder is the daily decline, which
+*overstates* the improvement. Against that, all six post-kill stalls above one
+second fall in the 15:00 hour — exactly when the restarts, reaps and
+whole-process-table enumerations documented above were being run — which
+*understates* it. The following hours read 1.7%, 0.8%, 0.0%.
+
+A clean test needs tomorrow's 10:00–14:00 against today's 10:00–14:27, with
+no investigation running. Recorded as directionally consistent, not
+established.
+
+#### Supersede path tested [MEASURED]
+
+The watchdog's self-retirement was the one change that had never executed —
+it requires a real takeover to happen. It is now driven directly by
+`~/.serena/http-singleton/test/test-supersede.mjs`, which builds the takeover
+instead of waiting for one: a stand-in MCP endpoint (enough to satisfy
+`probe()`) is started as a *descendant* of the supervised child, then killed
+and replaced by a second one *outside* that tree.
+
+Nine checks pass, including that the watchdog stays quiet while the listener
+is its own, retires with `superseded` once it is not, kills its own child, and
+leaves the newcomer alone.
+
+**The test was then checked for discrimination**, which is the step whose
+absence invalidated the earlier reap verification. Run against a copy of the
+launcher with owner detection removed, it reports 6/9 and *times out* on the
+supersede check — no reaction in sixty seconds, which is precisely the
+original symptom. A test that cannot fail against the unfixed code proves
+nothing, and this one does fail.
