@@ -505,3 +505,88 @@ three completed runs.
 job's peak was only 356 MB this run, so it was never the memory driver. The
 timer remains enabled, so tomorrow's 00:30 run is the test of whether the
 pruning works — it should finish in seconds rather than hours.
+
+### 2026-08-17 19:31 [MEASURED]
+
+Reported: slow again. Unlike the 01:09 report, **the logger corroborates it**:
+the last 60 minutes had 18 of 118 windows over 50 ms (15.3%), six over 200 ms
+and two over one second. That is worse than the 08-16 stretch that prompted
+this whole investigation.
+
+#### [RETRACTED] The orphan kill did not produce a durable improvement
+
+The day-over-day comparison set up on 08-16 — same hours, no investigation
+running in the window — now exists, and it does not support the earlier
+reading:
+
+| window | n | max > 50 ms | > 200 ms | > 1 s | cpu median |
+|---|---|---|---|---|---|
+| 08-16 10:00–14:27 (before the kill) | 528 | 44 (8.3%) | 16 | 5 | 36.2 |
+| 08-17 10:00–14:27 (after) | 529 | 40 (**7.6%**) | 16 | 4 | **36.3** |
+
+Stall rate 8.3% -> 7.6% and cpu median 36.2 -> 36.3. That is no improvement.
+The 08-16 post-kill afternoon read 2.6%, and this file recorded it as
+"directionally consistent" with the prediction while warning the attribution
+was unclean. **The warning was right and the reading was wrong**: today's
+equivalent afternoon hours run 21.2%, 13.6%, 9.3%, 15.1%, 11.8%. The 2.6% was
+the daily decline, not the reclaimed core.
+
+Reclaiming 0.63 of a core was still correct on its own terms — it was real
+waste, and the Serena fix has held (see below) — but it is **not** the cause
+of the stalls, and this file previously implied otherwise.
+
+#### The CPU correlation has collapsed [MEASURED]
+
+The finding that stalls track CPU contention was the basis for everything that
+followed. Recomputed on today's data it no longer holds:
+
+| | windows with a > 50 ms stall | windows without |
+|---|---|---|
+| 08-16 | cpu median **50.2**, p90 87.4 | cpu median **21.5**, p90 38.4 |
+| 08-17 | cpu median **51.6**, p90 73.6 | cpu median **46.7**, p90 60.4 |
+
+The gap has gone from 28.7 points to 4.9. CPU no longer discriminates between
+stalling and non-stalling windows, so whatever is causing today's stalls is
+not CPU contention.
+
+Aggregate CPU agrees that saturation is not the problem: summed process time
+is 485.8% of one core across 16 logical cores — **30.4% of the machine**. The
+load is also diffuse rather than concentrated: the top three processes account
+for 224.5% and the remaining 86 processes for 261.5%, with eight processes
+above 20% of a core. There is no single culprit to remove this time.
+
+#### Memory is the leading candidate, not yet established [INFERRED]
+
+| | 08-17 01:09 | 08-17 19:31 |
+|---|---|---|
+| physical used | 88.8% | **90.1%** (3.1 GB free) |
+| committed | 53.9 GB | **64.8 GB** |
+| `Pages/sec` | 246 | **842** |
+
+`Page Reads/sec` — hard faults that actually reach disk, as distinct from the
+51,716 `Page Faults/sec` that are mostly cheap soft faults — reads **240.7**,
+with `Pages Input/sec` at 1899. So the machine is genuinely faulting from disk
+while a foreground application is trying to respond.
+
+This is consistent with the symptom in a way CPU no longer is: a foreground
+window whose working set has been trimmed must fault pages back in before it
+can pump messages, which produces exactly the isolated hundred-millisecond
+maxima against a sub-millisecond median that the logger records.
+
+**It is not established.** Disk service times remain fast (91.6% idle, 0.8 ms
+reads, queue length 0), so the hard-fault load is being absorbed comfortably;
+and no measurement here ties a specific stall window to a specific fault
+burst. The logger records `cpu_pct` but not fault rate, which is precisely the
+gap — testing this properly needs the logger extended to sample
+`Page Reads/sec` per window, so stalls can be correlated against faults the
+way they were against CPU.
+
+#### Both prior fixes held [MEASURED]
+
+- **Serena:** two `serena.exe`, no accumulated generations, 26 h and 8 h old.
+  The live `tsserver` descends from `node.exe(46928)` — the daemon restarted
+  yesterday — via a root PID that no longer exists, which is the *designed*
+  detached-spawn shape documented above, not an orphan.
+- **updatedb:** `dllhost`/Plan9FileSystem measured **0.0% of a core**, down
+  from 36-38% before the config change. `updatedb` is not running. The real
+  test of the pruning is the next timer firing, 2026-08-18 00:25.
