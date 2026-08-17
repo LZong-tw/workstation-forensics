@@ -590,3 +590,58 @@ way they were against CPU.
 - **updatedb:** `dllhost`/Plan9FileSystem measured **0.0% of a core**, down
   from 36-38% before the config change. `updatedb` is not running. The real
   test of the pruning is the next timer firing, 2026-08-18 00:25.
+
+#### Logger extended to measure memory [MEASURED]
+
+The gap identified above is now closed. `ui-response-log.ps1` records three
+more columns per window, all bracketing the window exactly as `cpu_pct` does
+so they describe the same interval:
+
+- `pgread_s` — system-wide **hard** page reads/sec. Hard faults only:
+  `Page Faults/sec` is dominated by cheap soft faults and reads in the tens of
+  thousands while nothing is wrong.
+- `availmb` — physical memory available at window end.
+- `fgfault` — page faults charged to the **foreground process** over the
+  window. This is the discriminating column: a system-wide rate says the
+  machine was faulting, but this says the process that failed to pump messages
+  was the one faulting. Left empty when the foreground changed mid-window
+  (verified working — rows with `fg_procs_seen=2` are blank), and `na` when the
+  handle could not be opened, since a failed query is not zero.
+
+**Cost, re-measured before deploying it**, per the rule that instruments must
+not perturb: **0.31% of one core and 93 MB at the production 30 s window** —
+indistinguishable from the 0.31% measured before the columns existed. At a 10 s
+window the same code costs 1.15%, because the PDH collections are per-window
+rather than per-probe; the cost is only meaningful with the window size
+attached.
+
+The existing series was migrated in place rather than rotated, so the
+day-over-day comparisons keep a single continuous history: 5201 rows, the
+oldest from 08-16 01:43, with the new columns null for windows that predate
+them.
+
+**Two marshalling bugs, recorded because the first one impersonated a
+different diagnosis.** `PdhAddEnglishCounterW` returned
+`PDH_CSTATUS_BAD_COUNTERNAME` for `\Memory\Page Reads/sec`, which reads
+precisely as "this zh-TW machine has no English counter names" — a plausible,
+locale-specific, entirely wrong conclusion. Acting on it led through counter
+index lookups (index 78 turned out to be `Announcements Domain/sec`, not
+`Page Reads/sec` — caught only because the resolved names were printed rather
+than trusted) and a `Win32_PerfRawData_PerfOS_Memory` alternative that measured
+correctly but cost **542 ms per query, 1.8% of a core**, seven times the
+logger's entire budget. `Get-Counter` was worse at 1020 ms.
+
+The actual causes were both in the P/Invoke declarations:
+
+1. `DllImport` defaults to `CharSet.Ansi`, so the counter path reached the `W`
+   entry point as ANSI bytes read as UTF-16 — garbage, hence "bad counter
+   name". `CharSet=CharSet.Unicode` fixes it.
+2. PowerShell marshals `$null` to an **empty string** for a `string` parameter,
+   which PDH reads as a log-file name and rejects with `PDH_INVALID_ARGUMENT`.
+   Declaring those parameters `IntPtr` and passing `IntPtr.Zero` sends a real
+   NULL.
+
+With both fixed the English counter path works on this machine, and the
+locale hypothesis was never true. The lesson is the one this file keeps
+relearning in other forms: an error message that names a plausible cause is
+still not evidence for it.
