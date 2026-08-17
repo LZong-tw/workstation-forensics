@@ -736,3 +736,106 @@ worse among stalls specifically. Narrowing the window, or tracking faults per
 foreground process rather than per window, would address it.
 
 n=15 stalling windows over 3.2 hours is a first look, not a result.
+
+### 2026-08-18 01:15 — following up the same session's numbers
+
+#### Why the updatedb table skips 08-17
+
+There is no completed 08-17 run to report. That night's job was **stopped
+mid-flight on purpose**, as the causal test that took the Plan9FileSystem
+`dllhost` from 36.2% / 38.1% to 0.0%. The gap in the table is the experiment,
+not a missing measurement.
+
+#### PRUNEPATHS confirmed at the database, not just the clock
+
+A 36-second run is consistent with pruning but does not prove it — the job
+could have been fast for some other reason. Checked directly:
+
+```
+locate -c /mnt   ->  9
+locate -c /      ->  804943
+locate -c /home  ->  270892
+```
+
+and those 9 are `/mnt` itself plus eight substring matches like
+`/usr/include/mntent.h`. `/mnt/c` is not in the database at all, while the
+database is otherwise fully populated. The pruning is real.
+
+**The unprivileged run of this check returned 0 and it was not a zero.** The
+first attempt printed `count: 0` for `/mnt` — with
+`/var/lib/plocate/plocate.db: 拒絕不符權限的操作` on the line above it. Without
+`sudo`, `locate` cannot read the database and every count is 0, including the
+sanity checks that were supposed to prove the database was populated. A
+permission failure that renders as the expected answer. This is the third time
+this investigation has read an unqueryable thing as zero.
+
+#### The `availmb` separation survives a drift check [MEASURED]
+
+`availmb` is a level, not a rate, so a session-long drift would manufacture the
+separation with no causal content: if the stalls happened to sit in the
+memory-poorer part of the block, that is all the 3560-vs-4173 gap would mean.
+
+Available memory does drift across this block — **upward**, +307 MB/h
+(r = 0.273) — and the stalls are heavily **early**: 13 of 15 fall in the first
+76 minutes of 200. So the raw comparison was confounded, and confounded in the
+direction that flatters it.
+
+Controlling for it by comparing each stalling window only against non-stalling
+windows within ±15 minutes:
+
+```
+n=15  median delta -628 MB   below zero: 12 of 15
+```
+
+The association survives, and is slightly larger than the uncontrolled gap of
+613 MB. Stalling windows really do sit in memory-poorer moments than their own
+immediate neighbours.
+
+#### But the mechanism is directly contradicted [MEASURED]
+
+Looking at individual windows rather than medians overturns the reading above
+them. Three groups, all from the same evening and mostly the same foreground
+process:
+
+**Stalls with no faulting.** The largest cluster — 21:41:22 through 21:42:54,
+four stalls of 149, 105, 310 and 145 ms — runs at `cpu_pct` 87.2–87.4 with
+`fgfault` of 227, 231, 153, 175. High CPU, essentially no paging.
+
+**Heavy faulting with no stalls.** 22:16:33 through 22:20:05, six consecutive
+windows:
+
+| time | `pgread_s` | `fgfault` | max_ms |
+|---|---|---|---|
+| 22:16:33 | 3626.9 | 373 | **1.8** |
+| 22:18:04 | 1576.4 | 364 | **1.4** |
+| 22:18:34 | 3227.3 | 328 | **1.5** |
+| 22:19:04 | 2668.9 | 343 | **2.3** |
+| 22:19:35 | 2039.4 | 402 | **4.3** |
+| 22:20:05 | 979.7 | 405 | **3.0** |
+
+This is the heaviest sustained system paging in the entire dataset, and the UI
+is at its most responsive.
+
+**The highest foreground fault counts are not stalls either.** 22:23:36 has
+`fgfault` 41837 — the largest in the table — and max_ms 29.9. 22:06:27 has
+`fgfault` 16013 and `availmb` 1891, the lowest memory reading in the block, and
+max_ms 9.8.
+
+So faulting occurs without stalls, at the highest magnitudes recorded, and
+stalls occur without faulting. **[RETRACTED]** — the "every memory column
+points the same way, which is the first evidence for the hypothesis" reading in
+the entry above does not survive this. The medians were carried by a handful of
+windows that had both, and the sample is not what it looked like: the stall
+rate falls 16.7% → 6.8% → 5.1% → 1.7% → 0% → 3.4% → 0% → 0% across the
+half-hours, so these are **not 377 independent windows but one degrading period
+followed by a quiet evening**, and the split was largely comparing the first
+hour against the rest of it.
+
+What is left is one unexplained association — stalling moments are ~600 MB
+memory-poorer than their immediate neighbours, and that does survive the drift
+control — while the causal story it was meant to support is contradicted by the
+same data. That is a smaller and more awkward result than the entry above
+claimed, and it is the correct one. This is the second hypothesis in this file
+to look supported at the median and collapse at the individual windows, after
+CPU. The median is where this investigation keeps going wrong; the per-window
+table is where it keeps getting corrected.
