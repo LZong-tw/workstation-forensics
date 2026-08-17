@@ -645,3 +645,94 @@ With both fixed the English counter path works on this machine, and the
 locale hypothesis was never true. The lesson is the one this file keeps
 relearning in other forms: an error message that names a plausible cause is
 still not evidence for it.
+
+### 2026-08-18 00:37 — scheduled verification [MEASURED]
+
+#### The updatedb pruning worked
+
+The first run under the new `/etc/updatedb.conf`, read from the journal rather
+than reported from memory:
+
+```
+8月 18 00:25:44 Starting plocate-updatedb.service...
+8月 18 00:26:21 Finished plocate-updatedb.service.
+8月 18 00:26:21 Consumed 11.970s CPU time over 36.305s wall clock time,
+                785.5M memory peak.
+```
+
+| run | wall clock | CPU | CPU/wall |
+|---|---|---|---|
+| 08-14 | 4 h 12 m 04.788 s | 10 m 27.102 s | 4.1% |
+| 08-15 | 3 h 31 m 20.251 s | 10 m 20.892 s | 4.9% |
+| 08-16 | 2 h 40 m 47.930 s | 10 m 02.840 s | 6.2% |
+| **08-18** | **36.305 s** | **11.970 s** | **33.0%** |
+
+Against the 08-16 run that is 9647.93 s of wall clock reduced to 36.305 s.
+The more telling number is the ratio of CPU to wall clock: it was 4-6%, i.e.
+the job spent almost all of its life blocked, and is now 33%. The blocking was
+the 9P traversal, and removing `/mnt` removed it.
+
+The `Consumed` line also no longer reports a swap peak; the three prior runs
+reported 119.8 M to 192.9 M. Memory peak itself is unchanged at 785.5 M
+against 784.3 / 839.4 / 1015.4 M, so the pruning cut time and paging, not
+footprint.
+
+`updatedb` is not running, and the Plan9FileSystem `dllhost` measured
+**0.0% of a core across three 15-second windows** — genuinely zero, not a
+missing reading (see below). Its lifetime average is 4.89% over 131 hours,
+which is the accumulated cost of the earlier runs.
+
+**A fabricated zero, caught. [RETRACTED]** The first attempt at that dllhost
+measurement assumed a single matching process, got an array, and computed the
+deltas from a null — printing `0.0%` three times. Those readings were
+meaningless, and they happened to agree with the expected answer, which is the
+dangerous case: had the errors not been visible in the same output they would
+have been reported as confirmation. Rewritten to handle multiple matches and
+to report an unopenable process as unknown rather than as zero. This is the
+same "null is not zero" failure this repo already documents, reproduced while
+verifying a fix.
+
+#### Memory hypothesis: direction consistent, not established [INFERRED]
+
+377 windows now carry the memory columns, covering 3.2 hours; 342 have an
+attributable `fgfault`. Split as CPU was:
+
+| split at max_ms > 50 | stalling (n=15) | not stalling (n=362) |
+|---|---|---|
+| `availmb` median | **3560** | **4173** |
+| `pgread_s` median | 162.3 | 116.8 |
+| `fgfault` median | 321 | 270 |
+| `cpu_pct` median | 40.7 | 31.8 |
+
+At the stricter `> 200 ms` split (n=6) the separation widens: `pgread_s`
+median 350.9 against 116.8, and `fgfault` median 8458 against 270 — but that
+`fgfault` figure rests on **four** attributable windows and should not be
+quoted as a ratio.
+
+Every memory column points the same way — stalling windows have less memory
+available and more faulting — which is the first evidence for the hypothesis.
+**It does not explain all the stalls**, and the worst-window table is where
+that shows:
+
+| max_ms | `pgread_s` | `fgfault` | reading |
+|---|---|---|---|
+| 660.8 | 350.9 | 25044 | heavy foreground faulting |
+| 512.4 | 145.8 | 8458 | faulting, also cpu 87.4 |
+| 488.7 | **3968.2** | **321** | system faulting hard, foreground barely at all |
+| 310.0 | 80.9 | **153** | no meaningful faulting; cpu 87.2 |
+| 143.3 | **7.4** | (n/a) | essentially no paging in the window at all |
+
+So there are stalls with large foreground fault counts, stalls where the
+system faults but the stalling process does not, and stalls with no paging
+worth the name. Memory looks like *one* contributor, not the mechanism.
+
+**A sampling bias that works against this analysis, stated because it is not
+obvious:** five of the ten worst windows have an empty `fgfault` because the
+foreground changed mid-window. Switching applications plausibly causes both a
+stall and a foreground change, so the windows most likely to be stalling are
+disproportionately the ones where the discriminating column cannot be
+computed. The 342/377 attributable rate is good overall but is probably much
+worse among stalls specifically. Narrowing the window, or tracking faults per
+foreground process rather than per window, would address it.
+
+n=15 stalling windows over 3.2 hours is a first look, not a result.
