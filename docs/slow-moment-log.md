@@ -1119,3 +1119,102 @@ to be real.
 
 Not done, and deliberately: reproducing #81353's kill-and-`--resume` test
 destroys the specimen, and the user is working in that session.
+
+---
+
+### 2026-08-18 19:37 — elevated ETW capture: the expensive session is not expensive per second
+
+Step 2 of "what would settle it" was run. One UAC prompt, `wpr -start CPU
+-filemode` for 60 s, system-wide sampling — nothing attached to, suspended or
+signalled any session. Trace: 2981 MB, exported to a 119 MB
+`CPU Usage (Sampled)` table.
+
+**The headline: the two active sessions are indistinguishable.**
+
+| | pid 56620 "expensive" | pid 29932 control | pid 73180 idle control |
+|---|---|---|---|
+| CPU during the sampled minute | **66.0% of a core** | **63.7%** | 0.3% |
+| in claude.exe's own image | 43.0% | 42.5% | 48.2% |
+| in unbacked executable memory | 47.9% | 45.1% | 0.6% |
+| in kernel | 8.6% | 10.7% | 46.9% |
+| lifetime average since 08-08 | 73.9% of a core | **2.8%** | 1.3% |
+
+Per second of actual work the two cost the same — 1.04x. Over their lifetimes
+they differ by 26x. **The entire gap is duty cycle, not cost.** That is a second,
+instruction-level line of evidence agreeing with the previous entry's
+normalization result (0.67–0.98x per unit of logged work), arrived at by a
+completely independent instrument.
+
+**Where the instruction pointer sits.** Roughly half the samples in both active
+sessions are at user-range addresses backed by no loaded image, concentrated in
+one 16 MB region (56620: 40.2% at `0x26ef1000000`, +4.8% and +2.9% in the two
+neighbouring regions; 29932 the same shape at `0x26f4d000000`), spread over 520
+and 717 distinct 4 KB pages. Three things point to JIT-compiled JavaScript and I
+am labelling the inference rather than asserting it: the addresses are in the
+user heap range where a runtime `VirtualAlloc`s code, the spread is far too wide
+for a stub, and the idle control has essentially none of it (0.6%). Meanwhile the
+idle control is 46.9% kernel — that is what a process parked in a wait looks
+like. Low kernel plus high unbacked-code execution is a session running
+JavaScript, not a runtime spinning on a poll. **That is the question this capture
+existed to answer, and it answers it.**
+
+One image address, `0x7ff67b4ac34f` (RVA `0x146c34f`), carries 20.7% of 56620's
+samples, 6.1% of 29932's and 2.8% of the idle control's — present in all three
+roughly in proportion to activity, i.e. shared hot runtime code, not a pathology
+specific to one session. Not disassembled: the loaded image is
+`claude.exe.old.1786403133530`, not the `claude.exe` on disk (which was replaced
+at 19:08, 29 minutes before the capture), and a Bun binary has no symbols, so an
+unsymbolized stack would read `claude.exe+offset` twenty times and name nothing.
+
+**Machine-wide, the largest non-idle consumer was not claude.** `MsMpEng.exe`
+(Defender) at **120.3% of a core** — roughly double either session. Recorded as
+an observation, not a cause: `claude.exe` had just been rewritten (324 MB) 29
+minutes earlier, so Defender scanning a fresh 324 MB binary is a live confound
+for this particular minute. The cheap follow-up is sampling MsMpEng over hours,
+not concluding from 60 seconds.
+
+#### Corrections
+
+**The "205.2% of a core during the capture" line in `capture.log` is retracted —
+it is my own arithmetic error, not a fact about the process.** `wpr -stop` took
+85 s to flush a 3 GB trace (19:38:24 → 19:39:49), so the script divided a 147 s
+CPU delta by its hardcoded 60. Corrected: ~84% of a core across the 147 s
+bracket, 66.0% during the sampled minute — against a lifetime average of 73.9%.
+The session was running slightly **below** its own norm, not at double it. I had
+this queued as a mandatory caveat to report and it would have been the sixth
+rate-with-the-wrong-denominator error in this investigation.
+
+**First-pass aggregation was wrong and the impossibility check caught it.** The
+export is hierarchical — a process rollup row, then module, then address, then
+per-thread leaves — and summing every row counted each sample up to four times.
+It produced 3296 core-s of CPU in a 60 s trace on 16 cores, where the ceiling is
+960. It also labelled the empty-Module rollup rows as "unbacked/JIT", inventing a
+23.2% JIT figure out of a row type. Fixed by taking only rows carrying a
+TimeStamp; rollup and leaf sum now agree to 0.0% for all three processes. Same
+class as the `Get-ChildItem -Recurse` artifact: the schema looked fine, only the
+physical impossibility of the total exposed it.
+
+#### Caveats that stay attached to these numbers
+
+- **`wpr` dropped 307,874 events** ("Please record this trace again"). Sampled
+  leaf weight totals 800 of a possible 960 core-s = **83% coverage**, so absolute
+  values may be understated by up to ~20%. The within-process *split* is much
+  more robust than the totals: ETW drops when buffers fill, which is time- and
+  burst-correlated, and there is no mechanism by which a drop would prefer an
+  unbacked-address sample over an image sample.
+- **Temporal coverage is a contiguous block**, not scattered. Both active pids
+  have samples in seconds 5–54 of the trace; the missing ten sit at the head and
+  tail, a view-window artifact. Neither had a single second below 10% of a core
+  within that block.
+- **This trace says nothing about idle burn.** Both sessions were working in
+  every sampled second, so the confound that has spoiled every CPU measurement in
+  this investigation is present here too. The detached sampler (step 1) is still
+  the only instrument aimed at that question, and it is still running.
+
+#### Status
+
+Mechanism for the original slowness: still **UNDETERMINED**. But
+"pid 56620 is pathologically expensive" is now retired on direct
+instruction-pointer evidence — it costs what the control costs per second, and it
+runs more of the time. Still open: whether it burns anything across a *verified*
+idle window.
