@@ -839,3 +839,138 @@ claimed, and it is the correct one. This is the second hypothesis in this file
 to look supported at the median and collapse at the individual windows, after
 CPU. The median is where this investigation keeps going wrong; the per-window
 table is where it keeps getting corrected.
+
+### 2026-08-18 10:50 — "slow again": not corroborated, and a controlled negative
+
+#### The instrument disagrees with the report
+
+| | 08-16 | 08-17 | 08-18 |
+|---|---|---|---|
+| whole-day `cpu_pct` median | 21.8 | 32.9 | **21.1** |
+| whole-day stall rate | 2.8% | 7.2% | **0.6%** |
+| worst `max_ms`, 08:00–10:30 | 1010 | 579 | **264** |
+
+Today is the best of the three days logged, by a wide margin on stall rate and
+worst-case latency. `p50_ms` sits at 0.25–0.35 ms. The one thing drifting up is
+the morning `cpu_pct` median across days — 17.4 → 22.2 → 24.5 in the 08:00–10:30
+window — background load rising without producing stalls.
+
+#### The largest process, and why it is not the answer
+
+Three Claude Code sessions are running. Lifetime CPU:
+
+| pid | project | age | CPU | average |
+|---|---|---|---|---|
+| 56620 | sugar-dating | 227.4 h | **165.30 h** | **72.7% of a core** |
+| 29932 | this investigation | 227.4 h | 6.09 h | 2.7% |
+| 73180 | finlab-executor | 189.4 h | 2.59 h | 1.4% |
+
+Session identity was established by elimination rather than assumed from
+timestamps: 29932 is this session (its slug and session id are the ones in my
+own scratchpad path), 73180 was idle at 0.3–0.9% matching a transcript last
+written 21.9 minutes earlier, leaving 56620.
+
+56620 has one thread in state `Running` at 74.8%, 2.08 **billion** page faults
+against 27 M for this session, and 15.8 GB read in 61.3 M operations — 277 bytes
+per operation, against 8704 B/op here. Its descendants account for 0.01 CPU-h,
+so the cost is in the Claude process itself.
+
+That session has run **37 workflows and 424 subagents**, 381 of them on 08-17
+alone, and subagents execute inside the parent process, so much of the CPU is
+attributable work. **But that does not cover most of it.** Splitting the
+process's life at the 08-16 measurement recorded earlier in this file:
+
+| period | length | CPU burned | rate | subagents |
+|---|---|---|---|---|
+| 08-09 03:00 → 08-16 18:00 | 183 h | 123.7 h | 67.6% of a core | ~5 |
+| 08-16 18:00 → 08-18 10:30 | 44.4 h | 41.6 h | 94% of a core | ~419 |
+
+The subagent era added roughly 26 points. The **68% of a core sustained across
+seven days with essentially no subagent activity** is the part that is not
+explained, and it is the open question. That session did hold a 901.6 MB
+transcript active until 08-14, so heavy main-loop use is a live alternative to
+a defect; this entry does not settle it.
+
+**The idle test failed to discriminate and is reported as such.** Thirty 20-second
+windows were sampled looking for "high CPU with no activity"; the session wrote
+its transcript in 28 of 30 windows and held 83–114% throughout. Two windows had
+zero transcript growth at ~110% CPU, which is not evidence of anything during an
+active workflow. The test did not answer the question it was built for.
+
+#### Workflows do not move the machine: a controlled negative [MEASURED]
+
+Hour by hour, hours with subagent activity look far worse than hours without:
+
+```
+agents running   n= 32  cpu median 32.0  stall median 4.2%
+no agents        n= 25  cpu median 20.9  stall median 0.0%
+```
+
+**That split is time-of-day confounding, not an effect.** Agent-bearing hours
+are mostly daytime hours. Comparing the same clock hour across days separates
+them:
+
+| clock hour | 08-16 | 08-17 | 08-18 |
+|---|---|---|---|
+| 04:00 | cpu 21.0 (0 agents) | cpu **19.7 (59 agents)** | cpu 20.9 (0 agents) |
+| 05:00 | cpu 19.6 (0 agents) | cpu **16.4 (52 agents)** | cpu 20.4 (0 agents) |
+
+The two heaviest agent hours in the dataset ran 59 and 52 subagents and produced
+the *lowest* CPU readings of their clock slots. Meanwhile 08-17 14:00 ran 18
+agents at cpu 56.3, and 08-16 10:00 ran **zero** agents at cpu 36.2 with a
+13.6% stall rate.
+
+The arithmetic explains why: `cpu_pct` is machine-wide across 16 logical cores,
+so a process pegging one full core moves it by ~6 points. The observed swings
+are 16 → 56, i.e. 2.5 to 9 cores. No single Claude session can account for
+that, and the biggest one demonstrably does not.
+
+This is the third hypothesis this file has had to reject, and the second
+rejected specifically because an aggregate split was confounded by something
+that tracked with the grouping — memory by session drift, this one by time of
+day. Both were caught by printing the individual rows.
+
+#### Also checked and cleared
+
+Rize reports 3.20 TB `VirtualSize`, which looks alarming and is not a leak:
+chrome is 3.53 TB and Slack 3.43 TB on the same machine. Chromium reserves
+TB-scale address space by design. Rize's real cost is a renderer holding 1.3 GB
+at 16.3% of a core sustained — genuine, but small.
+
+#### Honest note on the current hour
+
+08-18 10:00 shows cpu 39.8 and a 9.1% stall rate, the worst hour today. That
+hour is when this investigation was running back-to-back 20–60 second sampling
+scripts while the other session ran a workflow. The measurement is part of what
+it measured.
+
+#### Correcting the 2026-08-16 entry: pid 56620 is not this session [RETRACTED]
+
+The 08-16 entry above carries a disclosure headed *"the investigation is part of
+the load"*, attributing `claude.exe` pid 56620 — then 67.6% of a core over 183
+hours — to **this** session. That attribution is wrong, and it inverted the
+entry's point.
+
+Established twice, at different times, from different shell PIDs, by walking up
+from the tool process's own `$PID`:
+
+```
+51196(pwsh) <- 29932(claude.exe.old...) <- 27728(pwsh) <- 17692(WindowsTerminal)
+44764(pwsh) <- 29932(claude.exe.old...) <- 27728(pwsh) <- 17692(WindowsTerminal)
+```
+
+Claude Code spawns its shell tool processes as its own children, so the claude
+process that this investigation runs inside is **29932**, not 56620. Independent
+cross-check: the harness names this session's transcript as
+`C--Users-LZong\0f8fa802-…jsonl`, and that file's mtime tracks each tool call to
+the second.
+
+The correction reverses the meaning. This investigation has used **6.09
+CPU-hours** across its 227-hour life — 2.7% of a core, third of the three
+sessions. The single largest consumer on this machine was never the
+investigation; it is and was the other session. The original disclosure was
+written in the right spirit, and was simply about the wrong process.
+
+The `.exe.old.<timestamp>` in the image name is a Claude Code self-update that
+renamed the running binary underneath the process, which is also why a
+`Get-Process claude` name match does not reliably find all three.
