@@ -974,3 +974,148 @@ written in the right spirit, and was simply about the wrong process.
 The `.exe.old.<timestamp>` in the image name is a Claude Code self-update that
 renamed the running binary underneath the process, which is also why a
 `Get-Process claude` name match does not reliably find all three.
+
+### 2026-08-18 17:00 — the 68% baseline: the premise was wrong [RETRACTED]
+
+The entry above closed with "the seven-day 68% baseline predates the agents and
+stays open". A nine-agent workflow was run against exactly that question. It did
+not find the mechanism. It found that **the question was malformed**, and the
+error was mine.
+
+#### There was never a pre-subagent era
+
+The briefing I wrote asserted "~5 subagents" inside the baseline window
+(2026-08-08 19:00Z → 2026-08-16 10:00Z). The actual count:
+
+```
+pre-window   subagent files touched= 1970  records= 161924  MB= 599.8
+baseline     subagent files touched=  856  records=  67926  MB= 234.6
+recent       subagent files touched=  389  records=  25862  MB=  90.7
+```
+
+**856, not 5** — wrong by more than two orders of magnitude, spread across every
+day of the window (353 files starting 08-10, 311 on 08-11, 84 on 08-13). And
+1,970 subagent transcripts carry timestamps *before* the window opens, so **no
+era anywhere in the data is pre-subagent.** There is no control period to which
+a residual could be attributed.
+
+The error's origin: I counted `agent-*.jsonl` by mtime inside **one** session
+directory — `da3db8e2`, the session running *today* — and applied the result to
+a window that belongs to a **different** session, `ecf97575`, the 901.6 MB
+transcript that was live through 08-14. Right filter, wrong directory. The
+counter was validated in passing: run against the recent era it returns 389
+against the ~419 I had stated independently, so it reproduces my numbers where
+they were checkable and contradicts them where they were not.
+
+With the premise gone, the two "eras" differ in degree, not kind:
+
+| | subagent files/h | subagent records/h | CPU |
+|---|---|---|---|
+| baseline (183 h) | 4.68 | 371 | 67.6% of a core |
+| recent (44.4 h) | 8.76 | 582 | 94% of a core |
+
+1.87x the subagent rate for 1.39x the CPU. The 84x regime change I asserted does
+not exist.
+
+#### Per unit of work it is not expensive — it is cheaper than this session
+
+Apportioning CPU over the same window and dividing by logged records:
+
+| session | records | CPU | CPU-s/record | CPU-s/MB |
+|---|---|---|---|---|
+| 56620 sugar-dating (incl. its own subagents) | 178,310 | 123.7 h | **2.50** | **883** |
+| 29932 this investigation | 4,927 | 5.1–5.5 h | 3.75 | 1066 |
+| 73180 finlab | 483 | 2.1–2.6 h | 15.4–19.5 | 4693 |
+
+Ratio 56620/29932: **0.67x per record, 0.83x per MB.** Under an adversarial
+normalization that credits the control every hook record and strips sugar's
+estimated hook share, it is 0.98x. Every normalization tried lands at or below
+1.0. The raw 24x CPU gap comes with a ~21x work gap.
+
+This also corrects the workflow's own first draft, which used main-transcript
+records only and got 1.1x–1.6x; that denominator omitted 38% of the session's
+in-window records because it never descended into its own `subagents/` subtree.
+A duplication gate was run on the correction — 67,926 records, 67,926 distinct
+UUIDs, zero repeats, zero files skipped of 3,398 walked.
+
+#### The idle burn was never observed at all
+
+Every CPU measurement of 56620 in this entire investigation — `idle-correlate.txt`
+(28 of 30 windows had transcript growth), the T2 600-sample run, T3's 13
+intervals, the live sampler — was taken while the session was working. The one
+test built to break that confound died four minutes in because it was launched
+as a shell background job that did not outlive its session.
+
+So the phrase "burns a core while idle", which this file has been carrying since
+08-16, describes something **nobody has ever measured here.**
+
+Two further honest notes from the workflow:
+
+- It nearly reported five 60-second windows of zero bytes written as proof of
+  idle burn. They were an artifact of summing ~9,000 files with
+  `Get-ChildItem -Recurse`; a 20-second single-pinned-path probe showed steady
+  growth with zero directory-entry skew. Caught before it became the fourth
+  collapsed hypothesis in this file.
+- "148 of 183 hours had records = 80.9% active" survives only as literally
+  defined. At finer resolution the window is 62.4% within 5 minutes of a record
+  and 49.0% within 1 minute, and the implied active-only rate spans 83% to 138%
+  of a core depending on the threshold. Choosing the threshold whose answer looks
+  right is threshold-shopping and was refused.
+
+#### Mechanism: UNDETERMINED, and correctly so
+
+What is established: the burn is **user-mode compute** — 93% user over the
+process lifetime, 102.4 of 108.4 points user in a live 60 s sample. Not kernel,
+not syscall, not paging, not I/O. The "61 million tiny reads" figure was a
+base-rate illusion: 86 ops/s and 19.4 KB/s live cannot drive a core, and the
+count is simply 227 hours of accumulation.
+
+Rejected during this pass: page faults as the driver — process CPU was 103.3% of
+a core at 479 faults/s and 101.3% at 6,468 faults/s, invariant across a 91x fault
+swing. Also rejected, again: transcript size, which had already failed its own
+natural experiment when the live transcript shrank 5.6x on 08-14 with no change
+in burn.
+
+The one step that could name the code region is an elevated ETW/WPR sample.
+It failed twice from the current token:
+
+```
+Failed to enable the policy to profile system performance.
+Profile Id: CPU.Verbose.File  Error code: 0xc5585011
+Elevated: False, BUILTIN\Administrators = Group used for deny only
+```
+
+Claude Code on this machine is a **Bun/JavaScriptCore** binary, so V8 tooling
+(`--prof`, `--inspect`, the V8 ETW JIT provider) does not apply and ETW is the
+only profiler available.
+
+#### Upstream
+
+Four matching reports exist. Verified individually with `gh issue view` rather
+than taken from the agent's summary:
+
+| issue | state | date | title |
+|---|---|---|---|
+| #81353 | **OPEN** | 2026-07-26 | Idle CLI sessions burn 100%+ CPU each in recurring ~1.1h episodes |
+| #67664 | closed | 2026-06-11 | claude.exe main thread spins a core after sleep/hibernate — `uv__io_poll` busy-loop |
+| #62308 | closed | 2026-05-25 | Process spins at 100% CPU indefinitely when idle — `uv_backend_timeout()` stuck at 0 |
+| #10493 | closed | 2025-10-28 | Busy-wait loop in event loop causing excessive CPU during idle |
+
+**Nothing was filed.** There is no mechanism and no reproducible signature to
+report, and #81353 already covers the symptom class if the idle burn turns out
+to be real.
+
+#### What would settle it
+
+1. A **detached** idle sampler — Scheduled Task or fully detached process, not a
+   shell background job — aimed at the recurring 02:00–07:00 local window that
+   was empty on 5 of 7 baseline nights, sampling per-thread CPU and the
+   transcript length via a single pinned absolute path. If CPU collapses across a
+   verified multi-hour zero-record window, the whole phenomenon is work volume
+   and this closes. If it persists, there is finally a real anomaly with a
+   reproducible time window — which is also the precondition for filing.
+2. An **elevated** `wpr -start CPU -filemode` / `wpr -stop`, one UAC prompt. It
+   samples system-wide and does not attach to, suspend or signal the session.
+
+Not done, and deliberately: reproducing #81353's kill-and-`--resume` test
+destroys the specimen, and the user is working in that session.
