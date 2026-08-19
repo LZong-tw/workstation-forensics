@@ -1964,3 +1964,49 @@ last one returned a confident, identical 4.6 MB for every case including bare
 numpy, which is how it gave itself away.
 
 Nothing was changed. This is research.
+
+#### It transfers to semble, which makes today's singleton the small lever
+
+The obvious next question after the headroom result: semble is also Python and
+also ~600 MB. Same test, same machine, two runs per case:
+
+| | private bytes |
+|---|---|
+| `import numpy`, default | 498.9 MB / 498.9 MB |
+| `import numpy`, `OPENBLAS_NUM_THREADS=1` | 16.8 MB / 16.6 MB |
+| `import model2vec`, default | 510.7 MB / 510.4 MB |
+| `import semble.mcp`, default | 537.1 MB / 537.3 MB |
+| `import semble.mcp`, `OPENBLAS_NUM_THREADS=1` | **55.1 MB / 55.0 MB** |
+
+`model2vec` costs 510.7 MB against numpy's 498.9 -- about **11 MB of its own**.
+semble depends on model2vec and tokenizers, so an embedding model was the
+natural suspect for the 600 MB. It is not there at import time. The mass is
+OpenBLAS thread arenas, on both servers, from the same numpy.
+
+So the honest accounting of today's work: **the singleton was the small lever.**
+It is not wrong -- it does reap idle sessions, which was measured -- but it
+addressed how *many* servers exist, when about 90% of what each one holds is
+an arena that a scoped environment variable removes. Four concurrent stdio
+semble servers with `OPENBLAS_NUM_THREADS=1` would cost roughly 220 MB, which
+is less than the singleton's own subtree measured at 1,523 MB. The two compose;
+only one of them is large.
+
+One limit that must not be glossed: 55 MB is the cost at **import**. The live
+servers were 604 and 1,080 MB, so they allocate beyond import for real work --
+index caches and so on. What this removes is the ~480 MB OpenBLAS component per
+instance. It does not shrink a working server to 55 MB, and no claim here says
+it does.
+
+Where it would go, if applied:
+
+- semble via the singleton: `set OPENBLAS_NUM_THREADS=1` inside
+  `run-semble-stdio.cmd`, so it scopes to the semble child only.
+- semble via any project still pinning stdio: the `env` field of that
+  `.mcp.json` entry.
+- headroom: the `env` field of its `~/.claude.json` entry.
+
+Never user-wide. Serena is the obvious next candidate at 1,653 MB and is
+**untested** -- and unlike these two it does real numerical work, so throttling
+its BLAS threads is not automatically free.
+
+Still nothing changed. Still research.
