@@ -1336,3 +1336,44 @@ Closing that gap is cheap and is the right next change: record the top three
 processes by CPU in each window, into a new file so the existing schema is not
 broken mid-stream. Then the next episode names its own cause instead of being
 reconstructed days later.
+
+#### Correction, same morning: the 137.2% was an 8-second sample
+
+The entry above calls `MsMpEng.exe` "the largest single non-idle consumer" at
+137.2% of a core. That figure came from a single 8-second counter delta. Measured
+properly over 3 minutes, 36 samples:
+
+| | MsMpEng, % of one core |
+|---|---|
+| min | 4.5 |
+| p25 | 14.6 |
+| **median** | **26.1** |
+| p75 | 37.0 |
+| p90 | 65.0 |
+| max | 122.3 |
+| **mean** | **31.5** |
+
+Defender averages **0.32 of a core**, not 1.37. It bursts to 1.2 cores and the
+bursts do line up with the machine's own peaks (122.3% at 09:08:07 coincides with
+the machine's 67.5% high), but against a machine that is running 6.4 cores busy,
+excluding Defender entirely would remove about **5% of the load**. It cannot
+prevent the 80%+ episodes that the stall analysis identified.
+
+Last night's elevated ETW figure of 120.3% was a 60-second average and remains
+the better-founded number, but it was taken 29 minutes after `claude.exe` was
+rewritten to 324 MB — the confound the entry above claimed to have dismissed. The
+dismissal rested on today's 137.2%, and today's 137.2% does not survive. **Both
+readings are now back to being single elevated observations of a bursty process,
+and the "two independent instruments agree" claim is withdrawn.**
+
+This is the ninth rate-reported-from-too-short-a-window in this investigation and
+the first one where the bad number had already been used to recommend a change to
+the user's security configuration. The recommendation was withdrawn before the
+change was made.
+
+What the 3-minute window does show is that there is **no single culprit**. The
+machine carries roughly 6 cores of steady load spread across two claude sessions
+(~1.8 cores), Defender (~0.3), System, dwm, Slack, SearchIndexer, grok, turbo,
+pwsh and warp-svc — a long tail, none dominant. The stall episodes are whatever
+occasionally pushes that past ~11 cores, and the logger still does not record
+per-process attribution at those moments, so that remains unidentified.
