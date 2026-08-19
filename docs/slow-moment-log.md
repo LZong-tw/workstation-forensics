@@ -1615,3 +1615,74 @@ page-in, while the foreground window the probe watches is always fast.
 **Not established:** that freeing this memory removes the subjective slowness.
 That is a prediction, and closing sessions is the user's call, not something this
 repo does.
+
+#### Correction to the entry above: it is not per session, it is per grok run
+
+The entry above says "every Claude Code session spawns its own copy of each
+stdio MCP server". That is wrong, and the error was walking the parent chain
+only one level. Every parent printed was a 1 MB launcher shim -- a uv cache or
+pipx `Scripts\*.exe` -- which looks like the owner and is not. Walking to the
+real owner reverses the conclusion:
+
+| session | semble | headroom |
+|---|---|---|
+| claude 73180 | 0 | 1 |
+| claude 56620 | 3 | 3 |
+
+Sessions are not the multiplier. All three `semble` instances hang off **one**
+session, through three separate `grok.exe --prompt-file` subtrees:
+
+```
+python(86984) <- python(30516) <- semble.exe(26284) <- uv.exe(30852)
+              <- uvx.exe(75572) <- grok.exe(76360) <- pwsh.exe(20484) <- claude.exe(56620)
+```
+
+The multiplier is **one `grok.exe` invocation**. Each one re-reads the MCP
+config and starts the whole set from scratch.
+
+#### Measuring the fan-out instead of guessing at it
+
+Four grok runs were live, aged 6 to 29 minutes, all launched by one session's
+shell tool against the same project:
+
+| | |
+|---|---|
+| grok runs | 4 |
+| processes in their subtrees | **96 of the machine's 566 (17%)** |
+| private bytes held | **7,902 MB** |
+| CPU across all 96 | 0.3-2.5% of one core |
+
+One run costs 24-26 processes and 1.7-2.2 GB. Per fan-out: 24 `python`
+(5,720 MB), 12 `node` (1,089 MB), 8 `uv`, 8 `gk`, 8 `cmd`, 20 `conhost`.
+
+So the figure above was not 4.4 GB, it was 7.9 GB, and the 512-process baseline
+recorded earlier was measured *during* a fan-out -- roughly a fifth of it was
+this.
+
+#### What is actually chronic, once the fan-out is excluded
+
+Three processes over 300 MB sit outside every grok subtree: `serena`
+(1,606 MB), one `headroom` belonging to session 73180 (540 MB), and `tsserver`
+(1,720 MB, against `c:\dev\sugar-dating`). Genuinely orphaned: **177 MB**, a
+bare `node -` whose parent is dead. That is all. There is no accumulating pool
+of leftover MCP servers.
+
+#### What this retracts, and what survives
+
+Retracted: "the first thing found that is both large and directly reversible",
+and the implied recommendation to close sessions. Closing a session is not the
+lever, because the memory does not belong to sessions. Nothing was ever acted
+on, so nothing needs undoing.
+
+Survives, and is stronger: at the moment of the "it feels slow again" report,
+17% of the machine's processes and 7.9 GB of private bytes belonged to four
+concurrent agent runs in the session the user was typing into. That is a
+specific, dated answer to "why now" rather than a chronic condition, and it
+covers **both** symptoms the user named -- the terminal that felt slow is the
+same session hosting the fan-out, which also averages about one core on its
+own.
+
+**Free falsifiable test, no intervention required:** when the four runs finish,
+available memory should rise by roughly 7.9 GB and the trimmed residencies
+recorded above should recover. If it does not, the memory is not the fan-out's
+and this entry is wrong too.
