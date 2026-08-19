@@ -1515,3 +1515,103 @@ The genuine remainder, never excluded: `C:\Users\LZong\.claude` above
 change log with no removal events, not read from the live list, which needs
 elevation. The log not having wrapped and every addition post-dating its start
 is what makes the reconstruction sound -- but it remains a reconstruction.
+
+---
+
+### 2026-08-19 16:44 — a live report the instruments all called healthy
+
+A second "it feels slow again", at a moment when every instrument disagreed.
+Machine CPU 30-47%, disk 26% busy with a queue of 0.53, and **one** stall over
+100 ms in 91 windows that hour. Hard page reads were 4,756/s in an 8-second
+snapshot, which looks alarming until compared against the baseline the logger has
+been keeping all along:
+
+| hard page reads/s | |
+|---|---|
+| whole dataset p50 | 40 |
+| p90 | 1,437 |
+| p99 | 3,979 |
+| the 8 s snapshot | 4,756 |
+| whole dataset max | 33,224 |
+
+The 16:00 hour is one of the *quietest* of the day by paging (p50 82, p90 1,106)
+against 11:00 (p50 1,912, p90 3,199). Tenth candidate short-window rate error in
+this investigation, and the first one caught before it was reported.
+
+Asked what "slow" meant. Two answers: **Claude Code / terminal response**, and
+**window switching and dragging**. The second is what `ui-response-log.ps1`
+claims to measure, and it says the hour was clean -- so the probe is measuring
+the wrong thing.
+
+#### A hypothesis about the probe, and its refutation
+
+The probe only ever touches the **foreground** window, whose pages are resident
+by definition. Switching *to* an app is a different operation. With commit at
+62 GB on 31 GB of RAM, background windows should be trimmed and slow to answer.
+
+Refuted directly: probing all 21 visible top-level windows with `WM_NULL`, every
+background window answered in **0.2 to 16.4 ms**, none over 100 ms, against 0.25
+ms for the foreground. The message pump is not paged out.
+
+But the same output showed the trimming is real and severe:
+
+| window | resident / private |
+|---|---|
+| Telegram | 74 / 950 MB = **8%** |
+| TextInputHost | 27 / 302 = 9% |
+| PowerToys | 12 / 105 = 11% |
+| sublime_text | 12 / 83 = 14% |
+| LINE | 304 / 1269 = 24% |
+
+#### Accounting for the commit: no leak, 512 processes
+
+Committed 62.1 GB, of which per-process private bytes are 48.1 GB (78%), pool
+paged 5.21 GB and nonpaged 2.38 GB. The remainder is ordinary kernel overhead.
+**There is no single leak.** The total `VirtualBytes` of 871,832 GB is not one
+either -- Chrome reserves ~3.6 TB of address space per process for the V8 cage,
+and reporting that as a leak is a trap this file will not fall into twice.
+
+| image | private | processes |
+|---|---|---|
+| chrome | 7.26 GB | 56 |
+| claude | 5.60 GB | 3 |
+| python | 5.10 GB | 18 |
+| node | 3.24 GB | 21 |
+| WindowsTerminal | 3.32 GB | 2 |
+| vmmemWSL | 2.93 GB | 1 |
+| svchost | 1.72 GB | 100 |
+| logioptionsplus_agent | 1.16 GB | 1 |
+
+#### The actionable finding: MCP servers are duplicated per session
+
+48 python and node processes hold 10.0 GB of private bytes. **Eleven of them are
+idle -- under 1% of a core over a 10 s measurement -- and hold 5.1 GB**, on a
+machine with 4.2 GB available.
+
+| MCP server | instances | private each | total | CPU |
+|---|---|---|---|---|
+| `semble` | **3** | 604-1081 MB | **2,289 MB** | 0.0% |
+| `headroom mcp serve` | **4** | 540 MB | **2,159 MB** | 0.0% |
+| `serena start-mcp-server` | 1 | 1,588 MB | 1,588 MB | 1.5% |
+
+Every Claude Code session spawns its own copy of each stdio MCP server. Serena
+was already converted to a shared HTTP singleton and correspondingly has exactly
+one instance; nothing else followed. `semble` and `headroom` together hold
+**4.4 GB doing nothing**, at residencies of 0-24%, which is roughly the entire
+available-memory headroom of the machine.
+
+Also present, small but confirming the pattern: `mcp-remote` x10, UnityMCP
+`server.py` x3, `serena-stdio-bridge` x5, and five processes whose parent is dead
+(two `serena-http-singleton` daemons, a `claude-code-router` daemon, a bare
+`node -` holding 177 MB, and `ccstatusline`).
+
+This is the first thing found in this investigation that is both large and
+directly reversible. It is not the CPU-saturation mechanism recorded earlier --
+it is a plausible mechanism for the *chronic* feel that CPU saturation explicitly
+failed to explain, since it predicts exactly what was observed: every application
+trimmed to a fraction of its working set, so returning to any of them costs a
+page-in, while the foreground window the probe watches is always fast.
+
+**Not established:** that freeing this memory removes the subjective slowness.
+That is a prediction, and closing sessions is the user's call, not something this
+repo does.
