@@ -1871,3 +1871,29 @@ case the pid had been recycled. The grok run survived.
 
 `headroom` is untouched and still stdio at 540 MB per run, with no singleton to
 point at.
+
+#### The reaping claim, resolved
+
+The entry above left one thing under test: whether `--sessionTimeout 300000`
+actually reaps idle sessions, which is what decides whether stateful beats plain
+stdio or merely ties it. Watched for 390 s:
+
+| t | child servers | gateway subtree |
+|---|---|---|
+| +150 s | 4 | 2,990 MB |
+| +180 s | 2 | 1,530 MB |
+| +210 s | 1 | 785 MB |
+| +240 s | 2 | 1,586 MB |
+| +270 s | 1 | 791 MB |
+| +390 s | 1 | 1,523 MB |
+
+It reaps, and it converges. The rise at +240 s is a new session arriving, reaped
+again by +270 s -- which is the behaviour wanted, not a failure. So the ordering
+stands as claimed: stateful with an idle timeout is better than per-client
+stdio, not equal to it.
+
+Separately, and **not** attributable to the gateway: machine available memory
+fell to 0.80 GB at +330 s while the gateway subtree sat flat at 1,523-1,524 MB
+across those same samples. Something else consumed it. Source unidentified, and
+no rate is inferred from these points -- that error has been made enough times
+in this file already.
