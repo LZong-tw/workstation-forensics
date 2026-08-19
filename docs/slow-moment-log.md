@@ -1782,3 +1782,92 @@ reading its state file -- before the project file changes.
 exists to point it at.
 
 Nothing here was changed. This entry records the mechanism only.
+
+---
+
+### 2026-08-19 — the singleton was not a singleton; fixed, at the user's direction
+
+Everything below was changed **outside this repo**, on the user's explicit
+instruction. This repo still changes nothing; it records what was done and what
+the measurements showed.
+
+Two corrections to the entry above first.
+
+**"byte-identical" was wrong.** `.mcp.json` and `.mcp.json.bak-semble-singleton`
+are 154 and 145 bytes, 9 lines each, and the 9-byte difference is exactly the
+CRLF/LF line endings -- 9 CR in one, 0 in the other. Content-identical, not
+byte-identical. The conclusion it supported is unchanged.
+
+**The watchdog-restarts-healthy-gateways line needs no retraction, but the
+`ensure` failure has a better explanation than "broken".** `ensure` failed once
+with `did not become healthy (ECONNREFUSED)`, then succeeded unchanged after a
+foreground run of `start-gateway.cmd` had warmed the `npx -y supergateway`
+cache. That ordering is suggestive, not proven -- one trial each.
+
+#### The singleton forks one server per request
+
+Bringing 9131 up exposed the real defect. `start-gateway.cmd` ran supergateway
+with no `--stateful`, and its own startup banner says `Running stateless
+server`. In that mode it forks a **fresh stdio child per request**:
+
+```
+listener node(80384)
+  |- cmd -> uvx -> uv(124MB) -> semble -> python -> python(604 MB)
+  |- cmd -> uvx -> uv(127MB) -> semble -> python -> python(604 MB)
+  +- cmd -> uvx -> uv(126MB) -> semble -> python -> python(605 MB)
+subtree: 2,258 MB across 19 processes
+```
+
+Three children for exactly three requests -- one `ensure` health check and two
+`status` probes -- and none of them exited afterwards.
+
+So switching `.mcp.json` from stdio to HTTP did not remove the duplication. It
+converted *one server per client process, dying with the client* into *one
+server per request, never reaped*. Strictly worse. Reported before going
+further, since this was a regression caused by the change itself.
+
+#### A test that could not discriminate, and one that could
+
+`--stateful` was added along with `--sessionTimeout 300000`. Retesting with
+three bare `initialize` calls gave three children again -- but that result is
+worthless, because three independent initializes *are* three sessions, and one
+child each is correct behaviour. The test had no discriminating power.
+
+The test that does: keep the session id.
+
+| | child servers |
+|---|---|
+| before | 3 |
+| after 1 `initialize` + 3 requests carrying its `Mcp-Session-Id` | **4** |
+
+Delta **+1**, not +4. The session id is honoured and the child is reused. So
+per-session, not per-request:
+
+| mode | one semble per | reaped |
+|---|---|---|
+| stateless (as found) | request | never |
+| stateful + sessionTimeout (now) | session | on idle timeout |
+| plain stdio (before all this) | client process | when the client exits |
+
+Whether the idle reaping actually fires is **still under test** and is the
+claim that decides whether this is better than plain stdio or merely equal.
+
+#### One hazard worth recording
+
+`semble-http-singleton.mjs restart` is unsafe while other clients are running.
+Its `stop()` calls `killSembleTrees()`, which matches *any* command line
+containing both `uvx` and `semble[mcp]` -- including servers belonging to
+unrelated processes. A grok run was still in flight, so the gateway subtree was
+killed directly by its recorded `gatewayPid`, verified by command line first in
+case the pid had been recycled. The grok run survived.
+
+#### Changed
+
+- `C:\dev\sugar-dating\.mcp.json`: stdio -> `http://127.0.0.1:9131/mcp`.
+  Tracked by git, currently modified and uncommitted. Backup:
+  `.mcp.json.bak-20260819-stdio`.
+- `~/.semble/http-singleton/start-gateway.cmd`: added `--stateful
+  --sessionTimeout 300000`. Backup: `start-gateway.cmd.bak-20260819-stateless`.
+
+`headroom` is untouched and still stdio at 540 MB per run, with no singleton to
+point at.
