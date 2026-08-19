@@ -1464,3 +1464,54 @@ every `ui-response.csv` row after 09:11 reads `fg_proc = WindowsTerminal`,
 
 It records `busy_cores` and `accounted_cores` separately (5.55 against 4.32) so
 the unattributed remainder is visible instead of hidden.
+
+#### Third correction: the exclusions I recommended were already in place
+
+Asked to verify the Defender exclusion state properly rather than assert it.
+`Get-MpPreference` unelevated does not return null or an empty list for
+`ExclusionPath` -- it returns the literal string
+`"N/A: Must be an administrator to view exclusions"`, so `.Count` is 1 and a
+naive truthiness check reports "one exclusion configured". That is a worse
+failure mode than null because it passes every has-a-value guard.
+
+Two channels that do work without elevation:
+
+- **Group policy exclusions:** `HKLM\SOFTWARE\Policies\Microsoft\Windows
+  Defender\Exclusions\{Paths,Processes}` -- **key does not exist**. A real
+  negative. The local key `HKLM\SOFTWARE\Microsoft\Windows Defender\Exclusions`
+  is **ACCESS DENIED**, which is not the same as empty and is not recorded as
+  such.
+- **Event 5007 (configuration changed)** in
+  `Microsoft-Windows-Windows Defender/Operational`, which logs exclusion
+  registry writes with old and new values. The log spans **2025-07-24 to now,
+  1410 events of ID 5007, 10.4 MB against a 16 MB cap, so it has not wrapped** --
+  a complete change history.
+
+24 of those 5007 events match "Exclusion"; two are feature flags
+(`TPExclusions`, `MpFC_EnableTPExclusionsSCCMNonMDEAttach`). The remaining
+**22 are real exclusions, every one of them an addition (old value empty), with
+zero removals**:
+
+| when | exclusion |
+|---|---|
+| 2026-08-02 | `C:\Users\LZong\.claude\projects` |
+| 2026-07-31 | **`C:\dev`**, `C:\Users\LZong\projects`, `AppData\Local\pnpm`, `AppData\Local\npm-cache`, `pnpmGlobal`, `C:\nvm4w` |
+| 2026-06-08 | `.fly\bin`, `C:\nvm4w\nodejs` (and `node.exe`), `codex.ps1`/`.cmd`/`.exe`, `nvm.exe`, `Git\bin\bash.exe`, `Git\usr\bin\bash.exe`, `@openai/codex` |
+| 2026-06-05 | `@openai/codex` |
+| 2026-04-14 | processes: `FreeFileSync.exe`, `FreeFileSync_*.exe` |
+
+**`C:\dev` has been excluded since 2026-07-31**, which is before every
+measurement in this file. The recommendation two sections above -- withdrawn on
+the grounds that it would only remove about 5% of machine load -- turns out to
+have had even less headroom than that: its largest item was already done, and
+Defender still averages 0.32 of a core with it in place. That is the third
+independent reason the Defender line goes nowhere, and it closes it.
+
+The genuine remainder, never excluded: `C:\Users\LZong\.claude` above
+`projects`, `.local\bin`, `Scripts`, `AppData\Local\Temp\claude`, the processes
+`claude.exe` / `bun.exe` / `pwsh.exe` / `git.exe`, and the WSL `ext4.vhdx`.
+
+**Limit of this inference.** Current state is reconstructed from a complete
+change log with no removal events, not read from the live list, which needs
+elevation. The log not having wrapped and every addition post-dating its start
+is what makes the reconstruction sound -- but it remains a reconstruction.
