@@ -2057,3 +2057,30 @@ edit. master now carries the HTTP form, so they inherit the fix on their next
 merge. Editing them now would create six local modifications that conflict with
 exactly that merge. None of them has a semble running at the moment, so the
 cost of waiting is currently zero. Left alone deliberately.
+
+#### The dead proxy does not break the MCP server
+
+The entry above raised this as a reason to question whether these servers
+should exist at all. Answered by speaking the protocol to one rather than
+reasoning about it:
+
+```
+initialize      OK   serverInfo = headroom 1.28.0
+tools/list      OK   headroom_compress, headroom_retrieve, headroom_stats
+headroom_stats  isError = false
+    Mode: token | 0 API requests | unknown
+    Compression: no requests compressed yet
+```
+
+stderr empty. The server starts, advertises its tools and answers a call with
+no proxy anywhere. It is inert, not broken.
+
+`headroom_retrieve` is the tool that needs the proxy, and it is only invoked in
+response to compression markers that the proxy itself produces. No proxy, no
+markers, so that path is never entered -- which the stats output confirms by
+reporting zero requests ever compressed. Not tested directly, because it takes
+a real compression hash as an argument and no such hash exists on this machine.
+That absence is itself the evidence.
+
+Left running by decision. With the env fix in place a new instance costs
+roughly a hundred MB rather than 540, so the cost of leaving it is small.
