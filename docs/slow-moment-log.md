@@ -2010,3 +2010,50 @@ Never user-wide. Serena is the obvious next candidate at 1,653 MB and is
 its BLAS threads is not automatically free.
 
 Still nothing changed. Still research.
+
+#### Applied, and it lands where predicted
+
+Changed outside this repo, on instruction. Backups alongside each file.
+
+- `~/.semble/http-singleton/run-semble-stdio.cmd`: `set OPENBLAS_NUM_THREADS=1`
+  and `OMP_NUM_THREADS=1` before the uvx line.
+- `~/.claude.json`, `mcpServers.headroom.env`: the same two variables. The file
+  is written live by three running sessions, so it was copied first and the edit
+  was a single targeted replacement; afterwards it parses, keeps all 114
+  top-level keys and all 4 MCP servers.
+
+Restarting the gateway (targeted kill by recorded `gatewayPid`, never
+`restart`, whose `stop()` would kill unrelated clients' servers) and re-running
+the same three-probe test:
+
+| | before | after |
+|---|---|---|
+| private per child server | 604 MB | **122 MB** |
+| gateway subtree, 3 sessions | 2,258 MB | **825 MB** |
+| child servers over 300 MB | 3 | **0** |
+
+482 MB off each child, against a predicted OpenBLAS arena of about 480 MB.
+And the caveat held: 122 MB, not the 55 MB measured at import, because a live
+server allocates past import. The prediction was for the delta, and the delta
+is what landed.
+
+#### Serena: the mechanism does not transfer, tested not assumed
+
+Serena's site-packages contains **no numpy, scipy or sklearn** -- only tiktoken.
+Checked against the live processes rather than inferred from the package list:
+**0 BLAS or numpy modules mapped** in either running server. `OPENBLAS_NUM_THREADS`
+would do nothing for it.
+
+Its 1,672 MB is something else, and probably not waste: working set is **98 MB**.
+The rest is committed and paged out -- a symbol index for a large repository.
+The second Serena, on a smaller project, holds 242 MB by the same mechanism.
+Nothing here to trim.
+
+#### The six worktrees: correctly, nothing
+
+Six other worktrees still pin stdio semble in `.mcp.json`. Each is on its own
+branch with the file **clean**, so that is the committed content, not a local
+edit. master now carries the HTTP form, so they inherit the fix on their next
+merge. Editing them now would create six local modifications that conflict with
+exactly that merge. None of them has a semble running at the moment, so the
+cost of waiting is currently zero. Left alone deliberately.
