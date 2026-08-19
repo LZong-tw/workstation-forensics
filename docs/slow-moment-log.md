@@ -1897,3 +1897,70 @@ fell to 0.80 GB at +330 s while the gateway subtree sat flat at 1,523-1,524 MB
 across those same samples. Something else consumed it. Source unidentified, and
 no rate is inferred from these points -- that error has been made enough times
 in this file already.
+
+---
+
+### 2026-08-19 — headroom: the singleton was the wrong lever
+
+Researched what a singleton for `headroom mcp serve` would look like, the way
+semble got one. The answer is that it should not be built, for three
+independent reasons, and the third one is a 93% fix that a singleton could not
+have delivered.
+
+**1. It cannot share anything.** `headroom mcp serve --help` offers only
+`--proxy-url`, `--direct` (deprecated) and `--debug`. Transport is stdio, with
+no HTTP or SSE mode. So a singleton could only be a supergateway wrapper, and
+that gives one child per session -- the same limitation just measured on semble.
+Four concurrent runs would still be four servers.
+
+**2. The thing it exists to talk to is not running.** The MCP server's
+documented job is to fetch original content from the proxy at
+`http://127.0.0.1:8787`, and direct store access is deprecated and ignored.
+Nothing is listening on 8787. Three `headroom mcp serve` instances holding
+1,619 MB are attached to a proxy that does not exist.
+
+**3. The 540 MB is not what it looks like.** Two hypotheses died first, and both
+deserve recording because both were plausible:
+
+- *torch*, 468.5 MB on disk in the pipx venv. **Refuted directly**: the three
+  live servers load 66 modules between them and **zero** are torch, c10, cudnn
+  or onnxruntime. Largest mapped module is scipy's OpenBLAS at 19.5 MB. Disk
+  size is not RSS.
+- *Kompress loading a model*, the known CPU offender on this machine.
+  **Refuted**: `HEADROOM_DISABLE_KOMPRESS=1` is set at User scope and visible.
+
+What it actually is: numpy's bundled OpenBLAS committing per-thread arenas
+sized by core count. Sixteen cores here.
+
+| | private bytes, two runs |
+|---|---|
+| `import numpy`, default | 498.8 MB / 499.1 MB |
+| `import numpy`, `OPENBLAS_NUM_THREADS=1` | **16.5 MB / 16.7 MB** |
+| `import headroom.cli.mcp`, default | 517.0 MB / 517.0 MB |
+| `import headroom.cli.mcp`, `OPENBLAS_NUM_THREADS=1` | **35.0 MB / 34.7 MB** |
+
+**517 MB to 35 MB, from one environment variable, reproducible to within
+0.3 MB.** Three instances would fall from 1,619 MB to about 105 MB. That scales
+with however many instances exist, which is exactly what a singleton cannot do.
+
+The right change is therefore to scope `OPENBLAS_NUM_THREADS=1` to the headroom
+MCP entry in `~/.claude.json` via its `env` field, **not** to set it user-wide:
+the same variable would throttle every other numpy consumer on the machine,
+and a process doing real numerical work should keep its threads. A thin MCP
+shim that forwards HTTP does no numerical work at all.
+
+Honest limits on the number: private bytes is *commitment*, not residency --
+working sets in the same test were 30-63 MB. Commitment is nevertheless the
+binding constraint here, since this machine runs 62 GB committed against 31 GB
+of RAM, which is the whole reason paging came up in this investigation.
+
+Four measurement shapes failed before this one produced a number, all
+mechanical, all recorded in the scratchpad script: an invalid
+`-RedirectStandardInput 'NUL'`; `-ArgumentList` splitting a `-c` payload on
+spaces so python saw only `import`; an in-process RSS probe returning 0.0 MB;
+and -- the instructive one -- measuring the venv's `python.exe`, which is a
+1 MB redirector stub that re-launches the base interpreter as a *child*. That
+last one returned a confident, identical 4.6 MB for every case including bare
+numpy, which is how it gave itself away.
+
+Nothing was changed. This is research.
