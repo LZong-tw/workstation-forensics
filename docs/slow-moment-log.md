@@ -1686,3 +1686,99 @@ own.
 available memory should rise by roughly 7.9 GB and the trimmed residencies
 recorded above should recover. If it does not, the memory is not the fan-out's
 and this entry is wrong too.
+
+---
+
+### 2026-08-19 — why the fan-out is expensive: a singleton that is down, and a state file that says otherwise
+
+The previous entry established that the multiplier is one `grok.exe` run, not one
+session. This is the reason each run costs so much.
+
+Grok does not have its own MCP list -- its `~/.grok/config.toml` contains no
+`[mcp_servers]` at all. Its README states the sources are `config.toml`,
+plugins, **`~/.claude.json`, and `.mcp.json`**. It inherits Claude Code's set
+wholesale.
+
+#### Two defects, and they mask each other
+
+**The semble HTTP singleton is down.** `~/.claude.json` declares semble as
+`http://127.0.0.1:9131/mcp`. Nothing is listening on 9131; a POST is refused.
+Its own state file disagrees:
+
+```json
+"healthy": true,  "startedAt": "2026-08-19T02:22:13.685Z",
+"lastHealthyAt": "2026-08-19T02:22:34.637Z",
+"daemonPid": 7420,  "gatewayPid": 59372
+```
+
+Both pids are gone. The gateway came up, passed a health probe 21 seconds
+later, then died -- and the file still reads `healthy: true`. Anything trusting
+that file believes the singleton is up. Same failure shape as the brightness and
+mutex proxies recorded earlier in this investigation: a status indicator that
+survives the thing it indicates.
+
+**The project file pins the stdio form.** `C:\dev\sugar-dating\.mcp.json`
+declares `uvx --from semble[mcp] semble`. The singleton's own README says, in
+these words: *"Do not put `uvx --from semble[mcp] semble` in per-project
+`.mcp.json`."* Its sibling `.mcp.json.bak-semble-singleton` is byte-identical to
+it -- the conversion was backed up and never applied, or was reverted.
+
+The two defects hide each other. Because the project pins stdio, semble keeps
+working in that project, so the dead singleton produces no visible symptom --
+only a memory bill.
+
+#### What the stdio form costs, measured
+
+Four semble stdio stacks were live, five processes each:
+
+| component | per stack |
+|---|---|
+| `python.exe` (the actual server) | 604 / 604 / 604 / 1,080 MB |
+| `uv.exe tool uvx` | 118 / 127 / 151 / 164 MB -- resident supervisor, does nothing |
+| `uvx` + `semble.exe` + python shim | 1 MB each |
+
+About **3.4 GB**, 43% of the 7.9 GB fan-out. The 561 MB of `uv.exe` is pure
+launcher overhead that never exits.
+
+#### Why nobody noticed the gateway dying
+
+The supervisor log covers 2026-08-01 onward: 247 lines, 143 of them
+`Start-Process start-gateway.cmd`. Every failure line -- `gateway stopped`,
+`watchdog failure` -- falls on **08-01 and no later**. From 08-03 to today there
+are 152 launch lines and zero stop lines, because the persistent supervisor is
+not running; the README states SessionStart hooks call `ensure`, which
+`Start-Process`es the gateway and exits. Each line is one session start, not one
+supervised restart. When the gateway dies afterwards, nothing observes it and
+nothing writes it down. The gateway's own log has an mtime of 08-01 14:01,
+eighteen days stale across roughly 40 launches since.
+
+The 08-01 failures are worth recording separately, because the watchdog was
+restarting **healthy** gateways:
+
+```
+watchdog failure 1/3: 200
+watchdog failure 2/3: 200
+watchdog failure 3/3: 200
+watchdog restarting gateway pid=21276
+gateway stopped code=watchdog:200; restart=1
+```
+
+HTTP 200 counted as a failure. Whether that logic is still present is not
+established -- it has produced no log line since 08-01, which is equally
+consistent with it being fixed and with the supervisor never running again.
+
+Launches per day: 31 / 30 / 15 / 30 on 08-10 to 08-13, then 10, 4, 1, 1, 2.
+That window coincides with the dwm degradation onset recorded elsewhere in this
+file. **Coincidence only** -- different subsystem, no mechanism proposed, and
+the count more likely tracks how many sessions were started per day.
+
+#### Order matters
+
+Fixing `.mcp.json` first, while 9131 is down, removes semble from that project
+entirely. The singleton has to be up and verified by an actual probe -- not by
+reading its state file -- before the project file changes.
+
+`headroom` is a separate problem: global stdio, 540 MB per run, and no singleton
+exists to point it at.
+
+Nothing here was changed. This entry records the mechanism only.
