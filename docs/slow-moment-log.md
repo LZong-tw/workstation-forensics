@@ -1218,3 +1218,121 @@ Mechanism for the original slowness: still **UNDETERMINED**. But
 instruction-pointer evidence — it costs what the control costs per second, and it
 runs more of the time. Still open: whether it burns anything across a *verified*
 idle window.
+
+---
+
+### 2026-08-19 08:35 — the instrument was watching the one window that never stalls
+
+A live "it's genuinely getting slow" report. This entry is the first in the file
+where the symptom and a measured variable line up on individual samples, and it
+is also where the previous entries' negative verdicts turn out to have been
+measured wrong.
+
+#### The instrument had a blind spot that invalidates every earlier "not corroborated"
+
+`ui-response-log.ps1` probes **the foreground window**. Stall rate by which app
+happened to be in the foreground, whole dataset:
+
+| foreground | stalls >100 ms | rate | worst |
+|---|---|---|---|
+| **powershell** | 0 / 967 | **0.0%** | 83 ms |
+| LINE | 14 / 34 | 41.2% | 911 ms |
+| Termius | 2 / 10 | 20.0% | 1005 ms |
+| Discord | 3 / 15 | 20.0% | 245 ms |
+| explorer | 4 / 30 | 13.3% | 1014 ms |
+| chrome | 11 / 234 | 4.7% | 1012 ms |
+| WindowsTerminal | 45 / 2851 | 1.6% | 2454 ms |
+
+PowerShell never stalls, and PowerShell was the foreground for 967 probes —
+including **all 714 probes from 02:00 to 07:00 today**, which are my own
+sampler's console. Every previous entry that concluded "the logger does not
+corroborate the slowness report" was reading a population dominated by the one
+application that does not exhibit the symptom. That is a sampling defect in the
+instrument, not a finding about the machine.
+
+**`max_ms` is also right-censored.** `TimeoutMs = 1000` in the probe, so the
+values at 1005 / 1010 / 1012 / 1014 ms are `SendMessageTimeout` hitting its own
+ceiling. Those rows mean "at least 1 s, true value unknown", not "1.01 s".
+
+#### Third memory hypothesis, killed per-sample before it was reported
+
+The obvious mechanism — background GUI apps get their working sets trimmed under
+memory pressure, so switching to them blocks the message pump while pages fault
+back in — fits the app ranking (LINE holds 1253 MB private against 249 MB
+resident). It is wrong, and the per-sample check killed it:
+
+- median `fgfault` in stall windows **100**, in clean windows **111**
+- **41 of 83** stalls have `fgfault` < 100, including the seven worst
+  (2454, 1014, 1011, 1005, 942, 911, 904 ms) which have `fgfault` of **0**
+- the largest `fgfault` ever recorded, 1,121,064 in LINE, produced max_ms **190**;
+  chrome at 148,380 faults produced max_ms **4**
+
+Grouped medians would have shown nothing either way; the counter-examples are
+what settle it. Bucketed by available memory the stall rate runs 0.41% → 3.74%
+and is **not monotonic** in the middle.
+
+#### What does hold: CPU saturation, monotonic, on individual samples
+
+First separating the confound. Windows where the foreground *changed*
+(`fg_procs_seen` > 1) stall at 28.8% versus 0.9% — but their stall rate does not
+track CPU at all (29.9% / 32.4% / 12.5% across rising CPU), so the probe is
+catching windows mid-focus-transition. That is a probe artifact and is excluded
+from everything below.
+
+Among the 4022 windows with **no** focus switch:
+
+| machine-wide CPU | n | stall rate | worst |
+|---|---|---|---|
+| 0–19% | 990 | **0.00%** | 36 ms |
+| 20–29% | 1495 | **0.00%** | 95 ms |
+| 30–39% | 931 | 0.75% | 1012 ms |
+| 40–49% | 346 | 1.73% | 706 ms |
+| 50–59% | 150 | 1.33% | 322 ms |
+| 60–69% | 71 | 5.63% | 350 ms |
+| 70–79% | 16 | 18.75% | 178 ms |
+| **80–100%** | 23 | **65.22%** | **2454 ms** |
+
+cpu ≥ 80% versus cpu < 40%: **65.2% against 0.2%**. Buckets are pre-specified and
+equal-width over the whole dataset, not selected points — the failure mode this
+file records twice. The top bucket is n=23 and that is the main weakness here.
+
+The machine reaches ≥70% only **1.1% of the time**, so this describes rare severe
+episodes, not the chronic feel.
+
+#### Who saturates it — and it is not claude
+
+Cross-referencing the high-CPU stall windows against the 5-second per-process
+sampler: **pid 56620 accounts for a mean 5.6% of machine CPU** during them.
+Restarting it, which the previous entry recommended, would not have touched this.
+
+Full per-process accounting (performance counters, not `Get-Process`, which
+silently under-reports protected processes):
+
+| | % of a core |
+|---|---|
+| **MsMpEng.exe (Defender)** | **137.2** |
+| claude 29932 | 99.0 |
+| claude 56620 | 81.9 |
+| System | 37.8 |
+| dwm | 19.7 |
+| SearchIndexer | 13.2 |
+
+**Defender is the largest single non-idle consumer on this machine**, and no scan
+is running — `FullScanOverdue` false, last quick scan 08-17, no full scan on
+record. That is real-time protection alone. Last night's elevated ETW trace
+measured it at 120.3% and this entry's previous version dismissed that as
+confounded by `claude.exe` having been rewritten 29 minutes earlier. **That
+dismissal was wrong**: two independent instruments 24 hours apart, with no binary
+rewrite the second time, both land at 120–137% of a core.
+
+#### What is NOT established
+
+That Defender causes the stall episodes. It is the largest *baseline* consumer;
+the logger records `cpu_pct` but not *which processes* were hot, so during the
+80–87% episodes there is no attribution. Defender at ~1.3 cores makes crossing
+the threshold likelier, and that is the whole claim.
+
+Closing that gap is cheap and is the right next change: record the top three
+processes by CPU in each window, into a new file so the existing schema is not
+broken mid-stream. Then the next episode names its own cause instead of being
+reconstructed days later.
