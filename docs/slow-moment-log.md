@@ -1377,3 +1377,90 @@ machine carries roughly 6 cores of steady load spread across two claude sessions
 pwsh and warp-svc — a long tail, none dominant. The stall episodes are whatever
 occasionally pushes that past ~11 cores, and the logger still does not record
 per-process attribution at those moments, so that remains unidentified.
+
+#### Second correction, same morning: what the CPU finding is and is not
+
+Three re-cuts of the same file, no new capture. Two of them cut down claims made
+two sections above.
+
+**The blind spot was confined to one day, and the sweeping version was wrong.**
+The entry above says every earlier "the logger does not corroborate it" was
+measured on a powershell-dominated population. Foreground composition by day:
+
+| day | n | top three foreground apps | powershell |
+|---|---|---|---|
+| 08-17 | 297 | WindowsTerminal 89%, remoting_desktop 5%, powershell 3% | **3%** |
+| 08-18 | 2848 | WindowsTerminal 87%, chrome 6%, powershell 4% | **4%** |
+| 08-19 | 1107 | **powershell 81%**, WindowsTerminal 13%, chrome 5% | **81%** |
+
+The 08-18 entry's negative verdict rested on 2848 probes that were 87%
+WindowsTerminal. A powershell blind spot does not touch it. Only **today** is
+contaminated, by my own sampler's console. Holding the app constant shows the
+size of the distortion:
+
+| day | stall rate, all fg | same day, WindowsTerminal only |
+|---|---|---|
+| 08-17 | 3.70% (n=297) | 3.42% (n=263) |
+| 08-18 | 2.21% (n=2848) | 1.37% (n=2475) |
+| 08-19 | **0.99%** (n=1107) | **2.80%** (n=143) |
+
+08-17 and 08-18 barely move. Today nearly triples, and today is the day that
+looked healthiest. **The correct claim is narrower and still fatal to the same
+conclusions: foreground composition drifts between days, so no day-level stall
+rate in this file was ever comparable to another day's.** The sweeping version
+above is withdrawn.
+
+**The gradient survives with the foreground app held constant.** This is the one
+re-cut that makes the finding stronger. Restricting to WindowsTerminal only
+(n=2809 no-switch windows, a single application) removes composition as an
+explanation entirely:
+
+| machine CPU | n | stall rate | worst |
+|---|---|---|---|
+| 0-19% | 330 | **0.00%** | 14 ms |
+| 20-29% | 1156 | **0.00%** | 85 ms |
+| 30-39% | 773 | 0.52% | 945 ms |
+| 40-49% | 329 | 2.13% | 706 ms |
+| 50-59% | 133 | 1.50% | 322 ms |
+| 60-69% | 54 | 5.56% | 350 ms |
+| 70-79% | 13 | 15.38% | 178 ms |
+| **80-100%** | 21 | **66.67%** | **2454 ms** |
+
+66.7% against 0.2%, one app, same shape as the pooled version including the same
+non-monotonic dip at 50-59%.
+
+**n=23 was really n=3.** Clustering the top-bucket windows with a 5-minute gap
+rule:
+
+| episode | windows | stalls | worst |
+|---|---|---|---|
+| 08-17 21:40 | 6 | 4 | 310 ms |
+| 08-18 19:24 | 9 | 3 | 286 ms |
+| 08-18 22:48 | 8 | 8 | **2454 ms** |
+
+Three episodes, not 23 independent trials, and the 2454 ms figure quoted twice
+above comes entirely from the third one. This is a weaker evidence base than
+"n=23" implied and the honest statement of it. Checked whether these were
+self-inflicted -- the ETW work that night finished at 20:03 (`cpu.etl` 19:39,
+the 119 MB export 20:03), nearly three hours before the 22:48 episode, and pid
+56620 held 3-5 children throughout. Not my own load.
+
+**And it does not explain the report that started this entry.** At 08:35, when
+the machine was described as genuinely slow, machine CPU was 45.4% -- the 40-49%
+bucket, 2.13% stall rate, worst 706 ms. The saturation mechanism is real and it
+describes **rare severe episodes**, three of them in three days. The chronic
+"it feels slow" at 45% CPU remains unexplained.
+
+**No blind spot in the new sampler.** `load-attrib-log.ps1` was registered as a
+scheduled task at 09:11:13, and a task that grabs the foreground is exactly how
+the 08-19 contamination happened in the first place. Checked rather than assumed:
+every `ui-response.csv` row after 09:11 reads `fg_proc = WindowsTerminal`,
+`fg_procs_seen = 1`. It runs windowless. First rows:
+
+```
+09:11:31  machine 34.7% = 5.55 cores  claude(56620) 97.3  System 67.2  claude#1 64.1  MsMpEng 30.3  dwm 29.9
+09:11:47  machine 30.5% = 4.87 cores  claude(56620) 106.2 claude#1 56.4 System 50.6  dwm 33.2  MsMpEng 23.4
+```
+
+It records `busy_cores` and `accounted_cores` separately (5.55 against 4.32) so
+the unattributed remainder is visible instead of hidden.
