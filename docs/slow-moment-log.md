@@ -2225,3 +2225,98 @@ returns it: no setting reclaims free guest pages while the VM runs. That kills
 everything in the guest, which currently includes a claude 3.2 days old, a
 codex, and a tmux server with sessions. Not the kind of thing to do without
 asking, so it was not done.
+
+#### Correction to the entry above: the cost figure was from the wrong window
+
+The entry states "at the time of the report, paging cost this: 3,243 hard
+faults/s". **It was not measured at the time of the report.** The report was
+21:10; that window was 21:26, fifteen minutes later, and during it my own
+scripts held 70% of a core while two claude processes were over 100% each. I
+wrote the perturbation down as a caveat and then published the number anyway.
+
+The windows taken so far, in order:
+
+```
+21:16   60 s      96 faults/s   cpu 39.4%    <- this is "at the time of the report"
+21:12    6 s     270 faults/s   (5 samples, caught a burst)
+21:21    5 min  2,367-5,647     cpu 80-133%, my scripts running
+21:26   60 s   3,243 faults/s   cpu ~120%,   my scripts running
+```
+
+A 34x spread across a figure published as if it were a property of the machine.
+This is the sixth instance of the same error and it has its own note for a
+reason.
+
+#### The clean number, and it is worse than either
+
+21:29, sixty one-second samples, nothing of mine running but the counter loop:
+
+```
+                    mean       min       p50       p95       max
+hard faults        3,266       271     2,498     9,590    14,953   /s
+available          3,611     2,162     3,605     4,188     4,212   MB
+disk read latency  1,765        85       147    11,385    20,290   us
+cpu utility         83.7      37.7      79.6     122.7     147.1   %
+
+3,266 faults/s x 1,765 us = 5,765 ms/s blocked, of 16,000 ms/s available
+```
+
+**About 36% of the machine's total thread capacity is blocked on paging.** That
+is a stall signature, and it is the first one this investigation has caught in a
+clean window.
+
+But the 21:16 window was also clean and measured 96 faults/s at 39% CPU. Two
+honest samples thirteen minutes apart differ 34-fold. The machine alternates
+between quiet and heavily paging, and the paging appears when it is busy --
+which is when a person would notice. The distribution, not either number, is
+the finding. How much of the day sits in each state is not known and one
+evening does not establish it.
+
+#### Where the paging actually goes
+
+The latency above is the multiplier that turns a fault rate into blocked time,
+and `_Total` was hiding which disk produced it:
+
+```
+disk                  mean lat    p95 lat    reads/s   queue
+0  d:  Samsung 980         0 us       0 us         0    0.00
+1  c:  WD SN5000S      4,593 us   7,967 us       186    1.25
+```
+
+Every page fault is served by `C:\pagefile.sys` on the WD SN5000S at 4.6 ms
+mean and 8.0 ms at p95, with a queue depth above 1. The Samsung 980 on D: is
+completely idle. Milliseconds, not the microseconds an NVMe should give -- so
+the fault rate hurts far more per fault than the first measurement suggested.
+Not investigated further tonight and not a recommendation to move anything.
+
+#### Two claims from the entry above, withdrawn
+
+**"Freeing the 11 GB ... should end the faulting entirely."** Withdrawn. The
+data argues against it: the 21:29 window faulted 34x harder than 21:16 with
+*more* available memory, the hardest-faulting samples are the highest-CPU ones
+(120-147%) and the quietest are the lowest (38-85%), and the faults-by-available
+band table is non-monotonic -- the 2000-3000 MB band faults harder than the
+1000-2000 MB band. Faults track demand at least as much as scarcity. Returning
+11 GB may reduce them a lot, a little, or not measurably. It is untested.
+
+**"Working sets are being trimmed."** Overstated. pid 8492 is flat at 1,062 MB
+across all twenty samples, and pid 56620's trace is one step down followed by a
+slow climb. That is not the oscillation a trim/refault loop would produce.
+
+What survives unchanged is the part that was actually measured: 12,415 MB
+allocated to a VM using 1,068 MB of it, flat to the megabyte across fourteen
+samples, with no setting that returns it while the VM runs.
+
+#### The durable lever, which the entry above omitted
+
+`.wslconfig` sets `memory=13002342400`, a 12,400 MB ceiling on a 32 GB machine.
+Restarting WSL returns the 11 GB once; it does not stop it happening again, and
+the guest's 39 GB of cumulative swap-out over 8 days says whatever fills it is
+recurring rather than a one-off. Lowering that ceiling bounds the worst case
+permanently, and it applies on the same restart that is needed anyway. The
+guest's steady state is about 1 GB, so the current ceiling is roughly twelve
+times what it habitually uses.
+
+Not changed. It is a settings edit on a machine whose owner has to pick the
+moment, because the restart it needs would kill a 3.2-day claude, a codex and a
+tmux server inside the guest.
