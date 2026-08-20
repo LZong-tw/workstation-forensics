@@ -2320,3 +2320,150 @@ times what it habitually uses.
 Not changed. It is a settings edit on a machine whose owner has to pick the
 moment, because the restart it needs would kill a 3.2-day claude, a codex and a
 tmux server inside the guest.
+
+### 2026-08-20 21:44 -- the paging cost was 15x too high, and 99.7% of the faults never touch disk
+
+The question that produced this entry was "why can't we just solve the fault
+problem directly?" Trying to answer it required knowing what a fault costs, and
+checking that turned up an arithmetic impossibility in what I had already
+committed two entries above.
+
+#### The impossibility
+
+The entry above publishes **3,266 page reads/s**. A separate measurement the
+same evening put the only busy disk at **186 disk reads/s**. Every hard page
+read is served by a disk read, so page reads can never exceed disk reads. One
+of those numbers had to be wrong, or they were not measurable against each
+other.
+
+They were not. Measured in the same 45-second window, they agree:
+
+```
+page reads/s          532.9
+disk reads/s (c:)     699.1
+ratio                    0.76      must be <= 1.0        ok
+
+pages input/s       4,599.0        8.6 pages per read -- read-ahead clustering
+implied fault bytes    18.0 MB/s   pages input x 4 KB
+actual disk read       19.0 MB/s                          ok
+```
+
+The counters were fine. Comparing two of them across different windows was not.
+That is the same failure as the entry above, in a new costume: not a polluted
+window this time, but a numerator and a denominator from windows minutes apart.
+
+#### Most page faults are not disk
+
+The other half of the answer is that "hard fault" and "page fault" are not the
+same thing, and I had been treating the fault rate as if the whole of it were
+memory pressure. Decomposed over the same window:
+
+```
+page faults/s        202,906    total
+  demand zero        166,743    brand-new zeroed pages, no disk
+  transition          25,841    recovered from the standby list, no disk
+  cache faults        10,472    mapped-file data
+  page reads             533    the only ones that reach a disk
+```
+
+**0.26% of page faults touch a disk.** Demand-zero faults are what every
+process does when it allocates; transition faults are pages the memory manager
+already had in RAM. Neither is scarcity, and no amount of free memory removes
+either. Total paging traffic is 19 MB/s against an NVMe good for roughly three
+thousand.
+
+#### The 36% figure is withdrawn
+
+Not refined -- withdrawn. It was mean(page reads) x mean(latency), taken from a
+window that was itself an outlier, and both factors sit far out on very long
+tails. Measured properly -- one 306-second window, 300 samples, the product
+formed per sample and then averaged:
+
+```
+counter               p05      p25      p50      p75      p95      max
+hard faults             5       26      125      677    5,689   11,927  /s
+disk read               0        1        4       14       40      152  MB/s
+read latency          111      170      324      805    4,148   16,831  us
+available           2,313    3,286    3,685    4,116    4,806    5,031  MB
+cpu utility            21       42       59       84      134      173  %
+cpu vs nominal         87      111      138      166      188      198  %
+run queue               0        0        0        1        6       62  threads
+
+paging cost   391 ms/s blocked, out of 16,000 ms/s across 16 cores  =  2.44%
+```
+
+**2.44%, not 36%.** Eliminating every page fault on this machine would buy back
+about one fortieth of its thread capacity.
+
+The distribution explains every number this investigation has published and
+also why they disagreed. Hard faults run p50 125/s and p95 5,689/s -- a 45-fold
+spread inside a single five-minute window. The samples I quoted at 96, 270,
+533, 3,243 and 3,266 are all real values of the same counter; the mistake was
+quoting any of them as a rate.
+
+It also reconciles the three disk latencies in the entry above -- 1,765 us from
+`_Total`, 4,593 us per-disk, 494.8 us in the consistency window, all within four
+minutes. `Avg. Disk sec/Read` is a ratio of two deltas, so it swings wildly when
+few reads land in an interval. Its p50 is **324 us**; the millisecond figures
+are means dragged up by a tail reaching 16.8 ms. The claim that the SN5000S is
+serving page faults in milliseconds does not survive: half the reads complete in
+under a third of a millisecond.
+
+#### So the fault problem cannot be solved, because there is not one
+
+All three routes to attacking faults directly fail on the same fact:
+
+- **Move the pagefile to the idle Samsung 980.** Reduces cost per fault. There
+  are 391 ms/s of cost to reduce.
+- **Free the 11 GB from the WSL VM.** Reduces the count of the 0.26%. Would not
+  touch the demand-zero faults, which are 82% of the total and are what
+  allocation looks like.
+- **Reduce demand.** This is the real one, but it is not a paging fix.
+
+#### What the same window says the load actually is
+
+```
+cpu utility      p50  59%   p75  84%   p95 134%   max 173%
+88 of 300 samples at or above 80% utility -- 29% of the window
+run queue        p50   0    p75   1    p95   6    max  62 threads
+cpu vs nominal   p50 138%                          -- turbo, not throttled
+```
+
+Threads are queueing for CPU, not for disk, and the run queue reaching 62 is a
+far better candidate for what "slow" feels like than 391 ms/s of paging.
+
+#### But this entry cannot name the consumer
+
+```
+attributed 216% of one core = 13.5% of the machine
+175 processes unreadable (not zero)
+
+process                    pid     core-%   core-seconds
+claude                   56620      106.5          326.1
+claude                   29932       26.4           80.8
+node                      8492        9.0           27.7
+chrome-headless-shell    31768        8.1           24.9
+Termius                  20584        6.6           20.3
+audiodg                  60164        5.8           17.9
+```
+
+Per-process attribution accounts for 13.5% of the machine against an observed
+p50 of 59%. The gap is not idle time -- it is that 175 of the running processes
+cannot be read without elevation, and this log's standing rule is that
+unreadable is not zero. Naming a cause from that table would be guessing.
+
+Two things are visible anyway. The largest single identified consumer is a
+`claude` process holding 106.5% of a core for the entire window, which is this
+investigation's own tooling, again. And `audiodg` appearing at 5.8% of a core
+over five minutes is consistent with the Intelligo APO burst already recorded
+elsewhere.
+
+#### What is unaffected
+
+The WSL finding stands exactly as measured: 12,415 MB allocated to a VM using
+1,068 MB of it, flat to the megabyte across fourteen samples over twenty-one
+minutes, invisible to every process-listing tool, with no runtime path to
+reclaim it. What changes is that it was never shown to cause the slowness, and
+the mechanism proposed for how it might -- paging -- has now been measured and
+found to cost 2.44%. The `memory=` ceiling is still worth lowering for the sake
+of the 11 GB itself. It is no longer a candidate explanation for anything.
