@@ -2084,3 +2084,144 @@ That absence is itself the evidence.
 
 Left running by decision. With the env fix in place a new instance costs
 roughly a hundred MB rather than 540, so the cost of leaving it is small.
+
+### 2026-08-20 21:10 -- "it feels slow again"
+
+Different mechanism from every previous episode. Not CPU, not dwm, not MCP
+fan-out: eleven gigabytes are being held by a virtual machine that is not
+using them.
+
+#### The usual suspects were all clear
+
+Sixty seconds of counters at the moment of the report:
+
+```
+cpu utility                39.4 %   mean     74.3 % max
+cpu perf vs nominal       115.4 %           155.4 % max   (above nominal, not throttled)
+run queue                  0.63 threads       4.00 max    (16 cores)
+disk read latency         552.6 us            1,980 us max
+disk queue                 0.00
+```
+
+No saturation, no throttling, no disk bottleneck. The 80%-CPU stall signature
+this investigation has been chasing was not present.
+
+#### The processes do not add up to the memory
+
+89.8% of 32 GB in use, and available memory swinging down to 641 MB. But a
+census of every process -- read through performance counters, because
+`Get-Process` was denied on 179 of 450 and an access denial is not a zero --
+found only **13,091 MB of private working set across all 450 processes**.
+
+Nearly 19 GB was somewhere else. Kernel pool accounted for about 5 GB of it.
+The rest showed up in one counter:
+
+```
+\Hyper-V VM Vid Partition(_total)\Physical Pages Allocated   12,415 MB
+vmmemWSL working set (Get-Process)                              726 MB
+```
+
+The process view understates the WSL VM by a factor of seventeen. Guest RAM is
+backed by host pages that belong to no process working set, so every tool that
+lists processes -- Task Manager included -- misses it.
+
+#### The VM is holding memory nothing wants
+
+Inside the guest:
+
+```
+              total   used    free   shared  buff/cache  available
+Mem:          12072   1068   10956        1         260      11003
+```
+
+One gigabyte in use. Eleven free. Every process in the guest added together is
+under 400 MB of RSS, the largest being a claude at 165 MB. There are no OOM
+kills. `Shmem` is 1.7 MB, so it is not tmpfs hiding it.
+
+Configured cap is `memory=13002342400` = 12,400 MB, and the host has allocated
+12,415 MB. **The VM sits at its ceiling to within 15 MB** and stays there.
+
+#### Reclaim is configured and does nothing
+
+`.wslconfig` already carries `[experimental] autoMemoryReclaim=gradual`. Two
+things had to be checked rather than assumed, and both came back against the
+easy answer.
+
+The setting is in the right section: the WSL docs as of 2026-06-02 still list
+`autoMemoryReclaim` under `[experimental]`, not promoted to `[wsl2]` the way
+`networkingMode`, `dnsTunneling`, `firewall` and `autoProxy` were. Placement is
+not the defect. Worth noting anyway that the documented default is `dropCache`
+and `gradual` is the slower option, so this configuration reclaims less than no
+configuration would.
+
+And it does not matter either way, because `autoMemoryReclaim` reclaims *cached*
+memory, and the guest's cache is 260 MB. The 11 GB is not cache. It is memory
+the guest allocated once, freed, and the host never took back.
+
+Measured rather than argued -- 21 minutes of sampling, changing nothing:
+
+```
+21:12:22  vid 12415 MB   guest used 1024 MB  free 11035 MB  cache 195 MB
+21:15:30  vid 12415 MB   guest used 1054 MB  free 10982 MB  cache 240 MB
+21:20:42  vid 12415 MB   guest used 1043 MB  free 10997 MB  cache 231 MB
+21:25:53  vid 12415 MB   guest used 1022 MB  free 11035 MB  cache 199 MB
+```
+
+Fourteen consecutive samples, identical to the megabyte. `gradual` is not
+gradually doing anything.
+
+#### What filled it: not updatedb
+
+The obvious suspect was the nightly `updatedb` scan across `/mnt` over 9P
+recorded earlier in this investigation. **Refuted.** `/mnt` is in `PRUNEPATHS`,
+`drvfs` and `9p` are both in `PRUNEFS`, and last night's run took 20 seconds:
+`plocate-updatedb.service` started 00:00:44, `plocate.db` written 00:01:04.
+That problem was fixed at some point and the note describing it is stale.
+
+What did fill it is not yet identified. The guest has been up 8 days and
+`/proc/vmstat` records 10,031,092 pages swapped out and 10,697,068 major faults
+over that time, so the pressure was real and repeated, not a single spike. But
+whatever caused it has exited, and WSL kept the pages.
+
+#### What it costs, stated honestly
+
+At the time of the report, paging cost this:
+
+```
+3,243 hard faults/s (mean, peak 8,465) x 330 us = 1,071 ms of blocked
+thread-time per second -- about one thread of sixteen, continuously.
+```
+
+That is a real tax and not a catastrophe. Working sets are being trimmed --
+the largest claude oscillates 2,910-3,269 MB against 4,841 MB committed -- but
+it is churn, not a death spiral.
+
+So: **11 GB of waste is established. That it causes the reported slowness is
+not.** The counters that would show a stall were not showing one. Freeing the
+11 GB would take available memory from about 3.5 GB to about 14 GB and should
+end the faulting entirely, which makes it worth doing on its own terms; whether
+the machine then stops feeling slow is a separate question that only trying it
+answers.
+
+One measurement caveat that belongs in the record: during the correlation
+sampling my own scripts were 70% of a core and the two claude processes over
+100% each. Part of the load being measured was the act of measuring.
+
+#### Two formatting artifacts that printed real values as zero
+
+Both in my own scripts, both caught, both the same class of bug as reading an
+access-denied query as a zero:
+
+- `Available MBytes` printed as `0.0` because the unit-scaling test matched
+  `Bytes` inside `MBytes` and divided a megabyte value by 1MB. True value 2,910.
+- `Avg. Disk sec/Read` printed as `0.0` because `N1` formatting on a
+  seconds-valued counter hides everything under 50 ms. True value 553 us --
+  and that counter is the one that decides whether a fault rate is a stall.
+
+#### Not done, and why
+
+Recovering the 11 GB requires restarting the WSL VM. Nothing short of that
+returns it: no setting reclaims free guest pages while the VM runs. That kills
+everything in the guest, which currently includes a claude 3.2 days old, a
+codex, and a tmux server with sessions. Not the kind of thing to do without
+asking, so it was not done.
