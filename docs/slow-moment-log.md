@@ -2467,3 +2467,101 @@ reclaim it. What changes is that it was never shown to cause the slowness, and
 the mechanism proposed for how it might -- paging -- has now been measured and
 found to cost 2.44%. The `memory=` ceiling is still worth lowering for the sake
 of the 11 GB itself. It is no longer a candidate explanation for anything.
+
+### 2026-08-21 10:00 -- retraction: the VM never held 11 GB; the counter reads the ceiling
+
+The user ran the discriminating test proposed in the previous entry, in the
+strongest possible form: WSL shut down entirely -- no perceived change; WSL
+restarted -- no perceived change. That result alone would only have said the
+11 GB was not the cause of the slowness. What it actually did was expose that
+the 11 GB was never there.
+
+#### The contradiction that forced a re-measurement
+
+Nine hours and forty-three minutes after the guest rebooted, before any
+pressure episode could have occurred:
+
+```
+guest uptime                9:43,  load 0.00
+guest memory                909 MB used / 11,074 MB free / 305 MB cache
+guest swap                  51 MB used   (was 1,951 MB before the restart)
+pswpout since boot          14,695 pages = 57 MB   (was 10.2 million)
+pgmajfault since boot       10,258                 (was 10.9 million)
+largest guest process       codex, 170 MB RSS
+
+\Hyper-V VM Vid Partition   12,400 MB -- already at the ceiling
+```
+
+A freshly booted, idle guest with 51 MB in swap cannot have ratcheted the
+host-side allocation to the ceiling through memory pressure. Either the
+ratchet story was wrong or the counter was. It was the counter.
+
+#### The balloon I said did not exist, exists
+
+Entry 2026-08-20 21:10 reported that the guest had no reclaim mechanism,
+based on `/sys/bus/virtio/devices` showing only a console and virtio-fs. That
+was the wrong bus. Hyper-V memory management does not ride virtio; it rides
+vmbus, and it was there the whole time:
+
+```
+[    0.314241] hv_vmbus: registering driver hv_balloon
+[    0.322799] hv_balloon: Using Dynamic Memory protocol version 2.0
+[    0.324455] Free page reporting enabled
+[    0.324937] hv_balloon: Cold memory discard hint enabled with order 9
+[   48.439766] hv_balloon: Max. dynamic memory size: 12400 MB
+```
+
+`CONFIG_HYPERV_BALLOON=y`, `CONFIG_PAGE_REPORTING=y`. The last line is the
+tell: the guest reached its maximum dynamic memory size 48 seconds after
+boot. The Vid counter has read the ceiling ever since -- because that is what
+it reads.
+
+#### The five-minute experiment that settles the counter's semantics
+
+Write 3 GB into guest tmpfs, delete it, and watch three numbers on the host:
+
+```
+time        vid counter    vmmemWSL private    host available
+09:59:11    12,400 MB          1,512 MB           1,856 MB    baseline
+09:59:16    12,400 MB          4,583 MB             624 MB    3 GB written
+09:59:19    12,400 MB          3,890 MB           1,371 MB    3 s after rm
+10:00:35    12,400 MB          1,514 MB           4,009 MB    75 s after rm
+```
+
+Three GB of real guest allocation moved `vmmemWSL`'s private bytes by three
+GB and the Vid counter by nothing. Freeing it returned every page to the host
+within 75 seconds -- private bytes back to the megabyte, host available up by
+2.6 GB. Free page reporting works, continuously, unprompted.
+
+So:
+
+- `\Hyper-V VM Vid Partition\Physical Pages Allocated` tracks the hot-added
+  visible maximum, not resident backing. Its 21-minute flatness at 12,415 MB
+  was the flatness of a constant.
+- The VM's true host cost is `vmmemWSL`'s private bytes, which track guest
+  usage: about 1.5 GB, then and now.
+- Freed guest memory returns to the host in under two minutes. There was
+  never a reclaim gap for `autoMemoryReclaim` to fill, and the `memory=`
+  ceiling bounds the worst case, not the steady state.
+
+#### What this retracts and what it reopens
+
+The 2026-08-20 21:10 entry's central claim -- 11 GB of host RAM held by the
+VM, invisible to every process view, with no path to reclaim it -- is
+retracted in full. Not refined: the quantity was misread from a counter whose
+semantics I never tested, and the missing reclaim mechanism was a search of
+the wrong bus. A five-minute perturbation experiment would have caught both
+on day one. The entry stays as written; this is what checking looks like.
+
+Two things survive unchanged: the 21:44 entry's measurements (paging costs
+2.44%, only 0.26% of faults reach disk, the load is CPU with a run queue
+touching 62) and the guest's historical pressure episodes (39 GB swapped out
+over 8 days was real, its cause still unidentified -- but its host-side cost
+was transient, since the pages went back).
+
+One thing reopens: the accounting gap that started this thread. If the VM
+holds 1.5 GB and not 12.4, then the readable processes' 13 GB plus the VM no
+longer approaches the 29 GB the host reports in use. The missing memory is
+somewhere in the 175 unreadable processes and kernel allocations, and naming
+it needs elevation, which remains the user's call.
+
