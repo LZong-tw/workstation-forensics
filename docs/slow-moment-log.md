@@ -2652,3 +2652,84 @@ back); the chrome fleet; and the dwm 1.3 GB / 37.9% pair, which is the
 long-standing degradation thread and survives everything short of a
 re-login. Nothing in this entry was changed, killed, or restarted.
 
+
+### 2026-08-21 10:42 -- correction: a session at one core is not spinning, it is in flight
+
+The previous entry named `claude` pid 56620 as the CPU consumer and called it
+spinning, on the strength of 235.8 CPU-hours over a 12.5-day lifetime. The
+user's reply -- it has been working continuously, but it never used to cost
+this much -- prompted a control measurement, and the control disproves the
+"spinning" half of the claim.
+
+#### An idle session costs 10%, an in-flight session costs 100%
+
+Two sessions, same binary, same host, sampled every 10 s. Pid 29932 is this
+investigation's own session; the window begins while it is waiting on an
+outstanding tool call and continues after its turn ends and it returns to the
+prompt.
+
+```
+                        56620 core%    29932 core%
+turn in flight            80 - 107      80 - 107
+idle at the prompt              --        5 - 17     (median ~11)
+56620 across 5 min       87 - 122            --      (median 97, never drops)
+```
+
+The number that matters is that this session's own cost collapses to about a
+tenth of a core the moment its turn ends, and 56620's never does. Its
+transcript confirms why: 319.1 MB at 10:30, 319.6 MB at 10:42, last written
+seven seconds before the check. It is not stuck and it is not spinning. It
+always has a turn in flight, exactly as the user said.
+
+#### The in-flight core is overhead, not work
+
+The strongest form of the measurement is accidental. During the 4-minute
+window above, the tool call pid 29932 was waiting on was a PowerShell probe
+that spends 240 of its 245 seconds inside `Start-Sleep`. The tool was doing
+nothing, the model was not generating, and the session still held 80-107% of
+a core, tapering to 33-87% late in the window. Whatever consumes that core is
+the session's own loop while a turn is open, not the work the turn asked for.
+
+That has an unpleasant consequence for a machine running two active agent
+sessions: two of sixteen cores are spent before any of them computes
+anything.
+
+#### And the in-flight cost does not scale with session size
+
+This is what answers the user's question, in the negative. The two sessions
+differ by 4x in heap and 9x in transcript:
+
+```
+                   56620        29932
+private heap       5.0 GB      1.26 GB
+transcript          319 MB       36 MB
+read IO ops/s        110.0         4.8
+user / privileged  92.7 / 6.1
+in-flight cost      ~100%       ~100%    <-- indistinguishable
+```
+
+A 5 GB V8 heap sawtoothing 400 MB every 60 s -- `4,851 -> 5,258 -> 4,857`
+across the idle window, continuously, at 92.7% user time -- costs no more per
+in-flight second than a 1.26 GB one. So the session did not get more
+expensive in CPU as it grew. The claim in the previous entry that it burns a
+core *because* something in it is wrong is withdrawn.
+
+What did grow is the memory footprint, and that is charged to the machine
+rather than to the session: 5 GB of private bytes on a host at 2:1 commit
+with 1.5 GB available is what keeps Memory Compression at 18.5% of a core and
+the modified-page writer fed. The session does not cost more; it makes
+everything else cost more.
+
+#### What "it never used to cost this much" resolves to
+
+Not a regression inside the session. A machine where a continuously-working
+agent session (one core, always), a second active session (one more), 46
+chrome processes (0.64 cores), dwm (0.38), and Defender (0.33) now coexist at
+2:1 overcommit. Every previously-chased villain in this log -- the WSL
+balloon, the paging latency, the spinning session -- was a single term being
+mistaken for the sum.
+
+The cheap lever is unchanged in size but changed in reason: restarting 56620
+with `claude -r` reclaims about 4 GB of heap and keeps the conversation. It
+will not reclaim the core, and this entry no longer claims it should.
+
