@@ -2565,3 +2565,90 @@ longer approaches the 29 GB the host reports in use. The missing memory is
 somewhere in the 175 unreadable processes and kernel allocations, and naming
 it needs elevation, which remains the user's call.
 
+
+### 2026-08-21 10:20 -- elevated at last: the consumer has a name, and the memory is overcommitted 2:1
+
+The user opened an elevated session and ran a read-only sampler: a 344-second
+TotalProcessorTime delta across all processes (501 of them, none unreadable
+this time), utility and run-queue samples every 15 s, and a full memory
+accounting. Yesterday's attribution covered 13.5% of the machine; this one
+covers essentially all of it.
+
+#### CPU: top of the table, 344.5 s window
+
+```
+name                 pid     core-sec   core-%   note
+claude             56620        358.0    103.9   another Claude Code session
+System                 4        242.3     70.3   kernel
+dwm                67732        130.5     37.9   the known dwm degradation
+MsMpEng            46428        113.1     32.8   Defender real-time scanning
+chrome             (all)       ~220       ~64    across 46 processes
+Memory Compression  4288         63.9     18.5   symptom, see below
+SearchIndexer      10336         32.2      9.4
+node                8492         31.6      9.2
+Termius            (two)         59.6     17.3
+svchost (camsvc)   11040         28.9      8.4   camera/privacy service, odd
+attributed: 1,611 core-sec = 29.2% of 16 cores, matching observed utility
+```
+
+The consumer yesterday's entry could not name is `claude` pid 56620: a
+`claude -r` session started 2026-08-08 23:05, alive 12.5 days, with 235.8
+accumulated CPU-hours -- an average of 0.79 cores continuously for its entire
+lifetime, and 103.9% of a core during this window. Its parent pwsh is alive;
+it is a real open tab, not an orphan. For calibration, this investigation's
+own session (pid 29932, started two minutes later) has 12.2 CPU-hours over
+the same 12.5 days. A session that burns a core around the clock, including
+whatever fraction of the day it sits idle, is not doing turn work; something
+in it is spinning. What, exactly, is not knowable from outside the process.
+
+#### Memory: the gap closes, and the real number is worse than the fake one
+
+```
+physical                 31,997 MB
+available                 1,557 MB
+committed                65,300 MB   -- 2.04x physical
+sum of private bytes     52,157 MB across 501 processes
+Memory Compression WS       569 MB; modified list 1,074 MB
+pool nonpaged 2,477 MB; pool paged resident 1,525 MB
+```
+
+Top private-bytes holders:
+
+```
+WindowsTerminal    17692    7,655 MB private,   131 MB resident
+claude             56620    4,955 MB (5.4 GB at re-check)
+python             21544    1,666 MB
+node                8492    1,529 MB
+vmmemWSL           61324    1,514 MB   -- exactly as re-measured, not 12.4 GB
+LINE                9728    1,305 MB
+dwm                67732    1,305 MB   -- the compositor holds 1.3 GB private
+node               40828    1,258 MB
+logioptionsplus     2180    1,250 MB   -- known
+claude             29932    1,210 MB   -- this session
+```
+
+The WindowsTerminal number deserves its own sentence: the terminal process,
+alive since the 2026-08-02 boot, holds 7.7 GB of committed memory of which
+131 MB is resident -- nineteen days of scrollback from long-running agent
+sessions, nearly all of it parked in the pagefile. Together with the three
+claude sessions (7.4 GB private between them) a single terminal window
+accounts for about 15 GB of the 65 GB commit charge.
+
+#### What "slow" is, on this machine, as of this entry
+
+Not one villain. The CPU side stacks a spinning agent session (one full
+core), the kernel, dwm, Defender, and 46 chrome processes into a p50 around
+50% with bursts past 130%. The memory side runs at 2:1 overcommit with 1.5 GB
+available, which keeps Memory Compression busy at 18.5% of a core and the
+modified-page writer feeding the pagefile -- the 2.44% paging cost from the
+21:44 entry is the disk-visible edge of that pressure. Every candidate this
+log has chased and retracted -- the WSL balloon, the paging latency -- was a
+misreading orbiting these two facts.
+
+Levers, all of them the user's to pull: look at what session 56620 is doing
+and close it if it is idle (one core and 5.4 GB back); restart the terminal,
+which kills every tab in it, three agent sessions included (7.7 GB of commit
+back); the chrome fleet; and the dwm 1.3 GB / 37.9% pair, which is the
+long-standing degradation thread and survives everything short of a
+re-login. Nothing in this entry was changed, killed, or restarted.
+
