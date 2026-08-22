@@ -3564,3 +3564,141 @@ instances is not cheap, and the first such sweep took 75 seconds to return. That
 in the older sampler -- and it is, again, the clearest direct measurement of the
 symptom being investigated.
 
+
+### 2026-08-22 17:55 -- the full series strengthens the locked-memory result and breaks one of the entries above it
+
+Both collectors were stopped before their scheduled end, so the windows are
+22.5 minutes (machine, n=49) and 20.3 minutes (ledger, n=101) rather than the
+planned 32 and 30. The data is complete up to the cut.
+
+#### The invariance is much stronger than the partial series showed
+
+The previous entry reported the gap moving 87 MB against a 1,201 MB swing in
+available memory, over 33 samples. With all 101:
+
+```
+series          min       p50       max     range   range as % of p50
+availMB         706     1,943     2,943     2,237       115.1%
+gapLo        13,590    13,755    13,856       266         1.9%
+gapHi         9,079     9,556    10,084     1,004        10.5%
+wsPriv        9,661    10,636    11,906     2,245        21.1%
+wsTotal      13,235    14,995    16,390     3,155        21.0%
+gpuCommit    11,487    11,494    11,506        18         0.2%
+gpuShared     9,883     9,914     9,945        62         0.6%
+poolNP        2,466     2,483     2,501        35         1.4%
+commit       67,744    67,957    69,780     2,037         3.0%
+```
+
+Available memory moved by more than its own median. Process private working
+sets moved by 2,245 MB. The gap moved by 266 MB.
+
+A regression settles the obvious objection -- that the "gap" is just an
+accounting error which would necessarily track whatever it fails to count:
+
+```
+pearson r(availMB, gapLo) = -0.585
+slope                     = -0.090 MB of gap per MB of available memory
+```
+
+If the gap were simply mis-counted available memory, the slope would be -1.000.
+At -0.090, **91% of the gap does not move with memory pressure at all**. The
+residual 9% is real and unexplained -- it may be a genuinely varying locked
+component, or a small accounting leak -- but it bounds the mis-accounting
+hypothesis to at most a tenth of the block. Nine to fourteen GB of this
+machine's RAM is locked.
+
+#### Correction: the ">=47.6% of paging is file-backed" bound is unsound
+
+The entry two above this one published, from the storage dimension, that at
+least 47.6% of the hard-fault read volume is clean file-backed rather than
+pagefile. The argument was that in one window 653 MB of `Pages Input` arrived
+while `Pages Output` was exactly zero and pagefile usage stayed flat, so those
+pages must have been clean.
+
+**That does not follow, and the reasoning has to be withdrawn.** A page read
+back from the pagefile keeps its pagefile slot. If it is not modified before it
+is trimmed again, it can be discarded without a write. So a system can sustain
+pagefile *reads* indefinitely with zero pagefile *writes* and no change in
+pagefile usage. `Pages Output` measures writes; it cannot bound reads in either
+direction.
+
+This session's own data makes the trap vivid rather than resolving it. Over
+22.5 minutes and 49 samples:
+
+```
+Pages Input/sec    p50   285.7   p90  1,516.2   max  25,782.6
+Pages Output/sec   p50     0.0   p90      0.0   max        0.9
+rows with Pages Output > 0 : 1 of 49
+```
+
+The modified page writer effectively never ran, while page-in peaked at 25,783
+pages/sec (101.2 MB/s). Under the withdrawn argument that would read as "almost
+all of the paging is file-backed." It is equally consistent with the machine
+re-reading private pages that already have valid pagefile copies from earlier in
+the 20.6-day uptime, which is exactly what a host that has been trimming for
+weeks would do.
+
+What survives from that finding: the observation that per-process file-I/O
+counters cannot see memory-mapped page faults, which is a real and independently
+correct explanation for the earlier 97.6 MB/s-versus-15.3 MB/s puzzle. What does
+not survive: any number attached to the split. **The file-backed versus
+pagefile-backed split is not determined by any counter available here.** It
+needs an ETW file-I/O trace where reads against `pagefile.sys` are identifiable
+by name.
+
+The practical advice is unchanged in direction and weaker in confidence: moving
+or adding a pagefile helps an unknown fraction of the paging read volume, and
+the fraction was never measured.
+
+#### The oscillation is seconds-scale, not minutes-scale
+
+Earlier entries described the machine oscillating between quiet and saturated
+"on a timescale of minutes." At 5-second resolution it is much faster than that.
+Rows where available memory moved more than 300 MB, or page-in exceeded 3,000
+pages/sec:
+
+```
+ts          avail   delta    pagesIn    reads  readMBs   cpu   runQ
+17:38:47    1,186    -216     25,783    2,192    101.2    26      0
+17:41:50      714    -482     10,163      731     39.4   135     27
+17:41:56    1,010    +296      3,331      946     11.8    61      1
+17:42:09    2,528  +1,359        651       54      2.3    62      0
+17:43:15      907  -1,621      1,129       99      4.4    64      0
+17:43:21    2,380  +1,473        382       27      1.5    46      0
+17:43:34    1,500    -623      3,861    1,268     13.7    67      0
+17:45:30    2,453     -56      9,986      837     37.8    46      1
+17:48:13    2,796  +1,163        252       18      1.0    64      0
+```
+
+Available memory sawtooths by 1.5 GB inside six seconds -- down 1,621 MB at
+17:43:15 and back up 1,473 MB at 17:43:21. Whatever drives it is not identified,
+and I am deliberately not naming a culprit from a handful of transitions;
+`Available MBytes` includes the standby list, so a swing this size can be
+working-set trimming into standby and repurposing back out again rather than any
+process allocating. Recording the shape, not a cause.
+
+Also worth noting against the earlier peaks: in this window `readLatMs` p90 was
+0.9 ms and disk queue never exceeded 1.0, against the 14,550 us p90 and queue
+19.7 recorded at the peak. The saturated phase was not sampled here. Everything
+in this entry describes the quiet-to-moderate part of the range.
+
+#### And, again, the largest consumer in the sample is the instrument
+
+Twelve `Process V2` sweeps, mean percent of one core:
+
+```
+idle:0                     1,000.7      (10.0 of 16 cores idle)
+pwsh:78716                    95.4   max 171.1   <- my collector
+claude:56620                  90.2   max 182.1
+pwsh:22516                    64.1   max 177.5   <- my probe shell
+dwm:67732                     56.5   max 118.9
+system:4                      48.3   max  76.7
+msmpeng:46428                 40.0   max 134.2
+claude:29932                  28.0   max  51.6
+searchindexer:10336           11.0   max  24.0
+```
+
+My two shells are the single largest attributable consumer in the window, ahead
+of the Claude session, dwm and Defender. Any reading of this table has to
+subtract them first.
+
