@@ -2811,3 +2811,102 @@ maintenance task, still resident an hour later, with VSS, swprv and wbengine
 all reported Stopped. Unreadable is not zero; it is the one item in this
 entry that has not been identified.
 
+
+### 2026-08-22 16:35 -- SrTasks identified and cleared; the thrashing got five times worse without it
+
+The unidentified 2 GB holder from the previous entry has a full provenance,
+and it is innocent. While that was being established the machine crossed into
+the worst state this log has measured.
+
+#### SrTasks: a restore checkpoint for a Store app update
+
+```
+15:07:15  WindowsUpdateClient id=44  download started
+15:09:35  SrTasks.exe created
+15:09:36  WindowsUpdateClient id=43  installing 9PLM9XGG6VKS-OpenAI.Codex
+15:09:39  WindowsUpdateClient id=19  install succeeded
+15:10:07  System-Restore id=8300  Scoping started   for HarddiskVolumeShadowCopy14
+16:16:21  System-Restore id=8301  Scoping completed for HarddiskVolumeShadowCopy14
+16:16:21  System-Restore id=8302  Scoping successfully completed
+```
+
+Windows Update installed a Store app, System Restore took a checkpoint one
+second before the install, and the resulting scoping pass ran for 66 minutes
+holding 2,075 MB at 10% resident before exiting on its own. Shadow storage is
+1.75 GB used of a 10 GB cap. Notably the periodic `\Microsoft\Windows\
+SystemRestore\SR` task last ran 2026-05-09 and failed with 0x8007042B and has
+no next run time -- so checkpoints on this machine happen only on demand, at
+install time, which is why this appeared without warning and will appear
+again on the next app update.
+
+The elevated probe reached the process one minute and forty-one seconds after
+it exited, so its command line was never captured. The event log answered the
+question the process could not.
+
+#### It was not the cause: removing 2 GB made things five times worse
+
+```
+                        16:03      16:25 (SrTasks gone)
+hard page reads/s    p50 2,290          p50  6,736
+                                        p95 15,418
+blocked on read          8.00%              40.93%
+read latency p50/p95  363 us / 1.7 ms   966 us / 15.0 ms
+available MB         p50 1,245          p50  1,159
+cpu utility          p50    40%         p50     64%
+```
+
+Forty-one percent of sixteen threads blocked waiting on a page read. The
+disk's own numbers show why the latency moved: `PhysicalDisk(C:)` is reading
+97.6 MB/s with a current queue length of 18, and this is where the reads are
+coming from:
+
+```
+attributed process file I/O   15.3 MB/s across 492 readable processes
+physical disk read rate       97.6 MB/s
+difference                    82 MB/s -- not file I/O, therefore pagefile
+```
+
+Per-process I/O counters cannot see hard faults. Five-sixths of the disk
+traffic is the memory manager reading back working sets it trimmed, which is
+the definition of thrashing and requires no misbehaving process to explain.
+
+#### Two suspects examined and dropped
+
+A snapshot showed `iGoSwServer` at 26,585 page faults/s, which would have
+been a satisfying culprit given the Intelligo APO bursts already recorded in
+this log. The next 60-second window put it at 4 faults/s and 0.0% of a core.
+It is a burst, consistent with the known ~20 s audio-event behaviour and with
+the ten Chrome Remote Desktop connect/disconnect events between 16:12 and
+16:19 -- not a sustained load. Reporting the snapshot would have been the
+same error this log has made nine times.
+
+The second was that Windows Search might be indexing the 10,227 transcript
+files and 5,107 MB under `.claude`. The crawl scope rules say otherwise:
+`C:\Users\` is the only included root, and `\.claude\`, `\.claude.json`,
+`\.serena\`, `\.codex\`, `\.cache\` and `AppData` all carry `Include=0`. Five
+include rules, 119 exclude rules. Not indexed.
+
+What is sustained, measured over 60 s:
+
+```
+Memory Compression   15.2% of a core   5,219 faults/s
+MsMpEng              13.3%             1,397
+SearchIndexer        12.0%               217   0.27 MB/s
+svchost camsvc        7.7%             4,323   6.31 MB/s
+```
+
+Memory Compression at the top of the fault table is a symptom by definition.
+The `camsvc` line -- the Capability Access Manager, reading 6.3 MB/s
+continuously -- is the one entry here that has no obvious reason to be there,
+and it was also at 8.4% of a core in yesterday's elevated sample.
+
+#### The standing account
+
+Committed 65,967 MB against 31,997 MB physical; paged pool 6,071 MB of which
+2,136 MB resident; 506 processes summing 50,277 MB private but only 15,476 MB
+of working set. Nothing on the machine is misbehaving. It is simply asked to
+keep more than twice its physical memory live, and the moment a working set
+is touched it must come back from a disk already 18 deep. The previous entry
+called this a second regime; this entry is that regime at four times the
+intensity, reached without any new process arriving -- one left.
+
