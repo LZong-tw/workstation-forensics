@@ -4177,3 +4177,127 @@ this signature, and that remains a live hypothesis rather than a dismissal.
 Interventions -- closing processes, RAMMap's `Empty` menu -- still come last, and
 never from inside the session under test.
 
+
+### 2026-08-23 23:32 -- the Processes tab names the holder, and it is the terminal this session runs in
+
+The previous entry ended by naming a test before running it:
+
+> **RAMMap's Processes tab** attributes private / standby / modified per process.
+> It would name the owner of the 8,445,120 KB directly, without an intervention.
+
+It does. Sorted by private working set, the Modified column reads:
+
+```
+Process            PID       Private       Standby      Modified         Total
+WindowsTermina    17692     493,672 K     4,076 K    6,419,680 K   6,935,284 K
+dwm.exe           67732     163,892 K       144 K      359,728 K     527,564 K
+chrome.exe        68280     700,264 K        32 K      318,372 K   1,025,164 K
+vmmemWSL          61324     531,864 K         4 K      185,288 K     721,480 K
+explorer.exe      15060      77,692 K       220 K      105,292 K     187,724 K
+LINE.exe           9728     202,060 K        32 K       26,648 K     232,444 K
+MsMpEng.exe       46428     397,924 K         4 K       15,272 K     417,888 K
+claude.exe        56620   2,847,252 K    10,704 K            0 K   2,870,528 K
+```
+
+**6,419,680 KB = 6,269 MB in one process -- 76% of all Process Private Modified,
+and 17.8x the next holder.**
+
+#### On reopening a claim retracted two entries ago
+
+Two entries ago this log retracted "WindowsTerminal pid 17692 holds the missing
+7 GB," and the reviewers who forced that retraction explicitly warned against
+reopening it on a fresh magnitude coincidence, calling that basis shopping. So the
+distinction has to be made precisely rather than waved at.
+
+**What was retracted stays retracted.** The prediction that `Driver Locked` would
+show 9-14 GB failed and will not be revived: that row has now read 598.9, 600.1,
+599.4 and 600.8 MB across 4.2 hours. And the *reasoning* behind the pid 17692
+claim was genuinely bad -- it rested on `PrivateMemorySize64`, which is commit, and
+on the assertion that no other process had comparable magnitude, which was false on
+that basis: system-wide `commit - working set` is 34,326 MB across 496 processes,
+with at least eight above 950 MB.
+
+**What is different now is the instrument, not the enthusiasm.** RAMMap's Processes
+tab is a *residency* measurement from a PFN walk, not a commit counter. On that
+basis the population is not dense -- it is one process at 6,269 MB and a second at
+351 MB. And the test was named in the previous entry, before the data existed. A
+pre-registered test that comes back positive is not basis shopping; it is the same
+procedure that killed the driver-locked claim, run again with the opposite outcome.
+
+#### The measurement that does not depend on the disputed column
+
+The 207x conflict over what "Modified" means is still unresolved, so an attribution
+resting on that column inherits the doubt. There is a statement that does not:
+
+> RAMMap reports **6,935,284 KB = 6,773 MB physically resident** for pid 17692,
+> while `Get-Process` reports a **557 MB working set** for the same process.
+> Twelve times its working set is resident and outside it.
+
+Whatever list those pages are on, they are in RAM, they belong to one process, and
+no counter in this log's ledger has ever reported them.
+
+#### The candidate explanation, labelled as such
+
+At 23:32, for the same process:
+
+```
+\GPU Process Memory(pid_17692)\Total Committed   6,999 MB
+\GPU Adapter Memory(*)\Shared Usage             10,088 MB
+\GPU Adapter Memory(*)\Dedicated Usage               0 MB
+PrivateMemorySize64                              7,761 MB
+Working set                                        557 MB
+Uptime                                           501.4 h   (since boot)
+Children: 5 x (pwsh + OpenConsole), plus wsl.exe
+```
+
+**Hypothesis, not a conclusion:** these are the integrated GPU's WDDM
+system-memory allocations for that process. Arc 140T has `Dedicated Usage = 0`, so
+every byte of GPU memory is system RAM by construction; the GPU committed figure
+and RAMMap's resident total for the same process differ by 226 MB, or 3.2%; and
+WDDM backs these with pagefile-backed sections owned by the process, which would
+present exactly as private, dirty and outside the working set.
+
+**Three reasons not to promote it further tonight:**
+
+- A 3.2% magnitude match is the pattern this log has now been caught on six times.
+  What makes this one different is that both figures name the *same process*; that
+  is better evidence than magnitude alone, and still not proof.
+- **The GPU committed figure is frozen bit-identical across 4.5 hours** (6,999 /
+  6,998.5 / 6,999 MB) while machine-wide Modified grows at 139 MB/h. A static
+  quantity cannot source a growing one. Either pid 17692's block is static and the
+  growth is in the other 24% -- dwm, chrome, vmmemWSL are all present in the table
+  -- or the identification is wrong. **Only one Processes-tab sample exists, so
+  this is currently undecidable.**
+- If RAMMap's Modified column is a decode artifact on build 26200, this attributes
+  an artifact. The residency statement above survives that; the GPU story does not.
+
+#### The next measurement, again named in advance
+
+**A second Processes-tab reading, 30 or more minutes from the first.** If pid
+17692's Modified is still ~6,269 MB while the machine-wide figure has climbed, its
+block is static and the growth belongs to the other processes in the table -- which
+would support the GPU reading and simultaneously identify a *second*, separate
+accumulator. If pid 17692's figure has climbed with the total, the GPU story is
+dead, because its GPU commit has not moved a byte.
+
+After that, and only deliberately: restarting that terminal is the decisive
+intervention. **It is also, if the attribution holds, a 6.3 GB fix.** The process
+has been up 501 hours -- since boot -- and holds five shell tabs.
+
+#### Disclosure, unchanged
+
+pid 17692 is the terminal hosting the Claude Code session doing this
+investigation. The chain, walked from the shell issuing the queries:
+
+```
+pwsh.exe (48944) -> claude.exe (29932) -> pwsh.exe (27728) -> WindowsTerminal.exe (17692)
+```
+
+That does not make the measurement wrong, and this log has already recorded the
+opposite error -- naming a process without checking whether the investigation lives
+inside it. It does mean the intervention cannot be run from in here.
+
+One incidental figure worth recording: `\Memory\Modified Page List Bytes` read
+44 MB at 23:22 and 15 MB at 23:32. Whatever that counter tracks, it is not a
+quantity that has been sitting at 8 to 9 GB and climbing all evening.
+
