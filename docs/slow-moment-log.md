@@ -4082,3 +4082,98 @@ It self-reverted to baseline in ~2.9 seconds and left nothing behind, and it is
 what refuted the stalled-writer claim. Recorded because an unannounced write to
 the system under test is exactly the thing this repository says it does not do.
 
+
+### 2026-08-23 -- four RAMMap samples over 4.2 hours: it is not a transient, and it grows
+
+The previous entry retracted an attribution, withdrew the replacement theory, and
+left exactly one thing open: RAMMap reported 8,742,052 KB on the Modified page
+list while `\Memory\Modified Page List Bytes` reported 25 MB, and that RAMMap
+figure had been observed **once**. The stated next step was three paired readings
+to distinguish a one-shot transient from a persistent instrument conflict.
+
+Four readings now exist, spanning 4 hours 10 minutes.
+
+```
+time    RAMMap Modified total        Process Private Modified     available *
+19:10   8,742,052 K =  8,537 MB      7,813,420 K =  7,630 MB       1,654 MB
+22:43   9,036,916 K =  8,825 MB      8,119,128 K =  7,929 MB       1,142 MB
+22:55   9,184,912 K =  8,970 MB      8,240,964 K =  8,048 MB       2,338 MB
+23:20   9,335,320 K =  9,117 MB      8,445,120 K =  8,247 MB         687 MB
+
+* available computed from RAMMap itself as standby + zeroed + free
+
+PDH  \Memory\Modified Page List Bytes    25 / 27 / 39 / 44 MB
+WMI  Win32_PerfRawData_PerfOS_Memory     44 MB   at 23:22:42, an independent channel
+```
+
+The closest pairing available is RAMMap at 23:20 against PDH at 23:22:42, 2.5
+minutes apart: **9,117 MB against 44 MB, a factor of 207.** The three earlier
+RAMMap samples were taken without a matching counter read, which is a real
+weakness and is why the pairing above is the one quoted.
+
+#### Three results, and they are clean
+
+**It is not a transient.** 8,537 -> 8,825 -> 8,970 -> 9,117 MB is monotone across
+four samples, growing 579 MB in 4.17 hours, or **139 MB/h**. Process Private
+Modified alone grew 617 MB, or 148 MB/h. The hypothesis that the 19:10 reading was
+a short-lived flood that had drained before the 19:12 counter sample is dead: a
+flood does not persist for four hours and does not climb monotonically.
+
+**It does not track memory pressure; it tracks time.** Over the same interval,
+available memory swung between 687 and 2,338 MB -- a factor of 3.4 -- while the
+Modified figure only climbed. This is the same shape as the dwm result earlier in
+this log: **accumulation, not load.** It is also the same invariance signature the
+gap itself showed at n=101, now measured on the disputed quantity directly rather
+than on a residual computed from it.
+
+**The conflict is persistent and reproducible.** Four RAMMap samples against four
+counter samples, 207x to 341x apart, with a non-PDH WMI channel agreeing with PDH
+to the megabyte. Not a misread, not a unit slip, not a stale snapshot.
+
+Incidentally, `Driver Locked` across the same four samples: 598.9, 600.1, 599.4,
+600.8 MB. **A 1.9 MB spread over 4.2 hours.** The retraction in the previous entry
+is confirmed four times over, and there is no version of this data in which that
+row holds 9 to 14 GB.
+
+#### What is now safe to assert regardless of the conflict
+
+All four tables pass internal validation: every row total equals the sum of its
+state cells, every column total equals the sum of its rows, and the grand total is
+32,765,148 KB in all four -- physical RAM, exactly.
+
+RAMMap's Process Private **Active** column tracks `\Process V2(_Total)\Working Set
+- Private` to within 1% at every sample. The two instruments agree on how much
+private memory is in working sets. They disagree only about the memory that is
+*not*.
+
+So the following holds whatever the Modified column should have been labelled:
+
+> Approximately 8 GB of process-private pages are physically resident and belong
+> to no working set, that quantity is growing at roughly 148 MB/h, and **no PDH
+> counter in this log's ledger reports them at all.**
+
+That is the origin of the 13 GB hole. Three weeks of this investigation ran a
+ledger that had no term for this memory, which is why the residual had to be
+invented rather than measured. Which list those pages sit on is still open; that
+they exist, are resident, and are invisible to the instrument is not.
+
+#### Still open, and the next step
+
+The 207x conflict remains unadjudicated and is now a finding in its own right
+rather than a loose end. Two cheap steps before reaching for a kernel debugger:
+
+- **RAMMap's Processes tab** attributes private / standby / modified per process.
+  It would name the owner of the 8,445,120 KB directly, without an intervention.
+- **RAMMap's Physical Pages tab** is a second aggregation over the same PFN walk
+  and is the cheap discriminator for a display or aggregation defect confined to
+  one column.
+
+Only after those: `livekd` -> `!vm 1` and `!partition`, which would settle whether
+the two instruments are enumerating different memory partitions. Note that this
+machine runs Windows build 26200 and RAMMap is not necessarily current with it; a
+PFN field-offset shift confined to the page-location decode would produce exactly
+this signature, and that remains a live hypothesis rather than a dismissal.
+
+Interventions -- closing processes, RAMMap's `Empty` menu -- still come last, and
+never from inside the session under test.
+
