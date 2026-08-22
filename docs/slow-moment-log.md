@@ -2733,3 +2733,81 @@ The cheap lever is unchanged in size but changed in reason: restarting 56620
 with `claude -r` reclaims about 4 GB of heap and keeps the conversation. It
 will not reclaim the core, and this entry no longer claims it should.
 
+
+### 2026-08-22 16:06 -- a different regime: paging is 18x yesterday and the CPU verdict does not hold today
+
+"Slow again -- is it just that long-running session? I did `/new`." Two
+questions, and the measurement answers both against the expectation.
+
+#### `/new` starts a conversation, not a process
+
+```
+pid    started        days   cpu-hrs   avg-cores   priv MB
+29932  08-08 23:07    13.7      14.4       0.044     1,251
+56620  08-08 23:05    13.7     264.7       0.805     4,987
+73180  08-10 13:04    12.1       3.3       0.011       788
+```
+
+No claude process on this machine is younger than twelve days, yet the
+sugar-dating project is writing to a transcript created today
+(`0ffa2d13`, already 57.6 MB, plus a subagent workflow tree). A new
+conversation belonging to a twelve-day-old process is only possible one way:
+`/new` cleared the conversation in place. Pid 56620 is the same process it
+was yesterday and still holds 4,987 MB -- V8 does not return a grown heap to
+the OS just because the objects in it became garbage. The command reset the
+context; it did not reset the process.
+
+#### And no, it is not that session -- today is not yesterday's problem
+
+Same instruments, 120 s, 40 samples:
+
+```
+                      2026-08-21        2026-08-22      change
+hard page reads/s     p50    125        p50  2,290       18x
+blocked on read           2.44%             8.00%       3.3x
+cpu utility           p50     59%        p50    40%      down
+available MB          p50  3,685        p50  1,245      -66%
+disk read latency     p50    324 us     p50    363 us    flat
+disk idle                    --              68%        not saturated
+```
+
+Yesterday's entry concluded "the load is CPU, not paging," and that
+conclusion was correct for yesterday's window. It does not describe today.
+CPU has fallen and hard faults have risen eighteenfold; the disk is 68% idle
+and its latency is unchanged, so this is not a slower disk, it is far more
+demand for it. This log now has two measured regimes and no basis for
+treating either as the machine's permanent character.
+
+#### The resident column is where "slow" lives
+
+```
+name                   priv MB     WS MB   resident%
+WindowsTerminal          7,743       826         11
+claude 56620             4,977     2,734         55
+SrTasks                  2,075       200         10
+vmmemWSL                 2,025     1,024         51
+python                   1,583        63          4
+dwm                      1,328       173         13
+logioptionsplus_agent    1,305        42          3
+LINE                     1,194       223         19
+chrome (58 procs)        8,369     4,422         53
+```
+
+Committed 66,417 MB against 31,997 MB of physical, with the pagefile grown to
+91,467 MB and a peak usage of 63,322 MB. At better than 2:1 overcommit the
+memory manager keeps roughly half of anything resident and trims the rest, so
+processes sitting at 3-13% resident have almost their entire address space in
+the pagefile. Every switch to one of those windows is a burst of hard faults.
+That is the felt symptom, and it is why the machine feels slow at 40% CPU.
+
+#### What changed since yesterday
+
+Chrome went from 46 processes to 58 (8.4 GB private, 4.4 GB resident) with a
+single visible window. `vmmemWSL` rose from 1,514 to 2,025 MB, consistent
+with the corrected model of guest usage tracking rather than a ratchet. And
+`SrTasks` appeared at 15:09 today holding 2,075 MB with a dead parent and a
+command line this session cannot read without elevation -- System Restore's
+maintenance task, still resident an hour later, with VSS, swprv and wbengine
+all reported Stopped. Unreadable is not zero; it is the one item in this
+entry that has not been identified.
+
