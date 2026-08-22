@@ -3372,3 +3372,195 @@ and disabling Chrome Remote Desktop (the event log shows it is in use).
   returned access-denied unelevated, and `Get-PhysicalDisk HealthStatus=Healthy`
   is a coarse operational flag that says nothing about NAND wear.
 
+
+### 2026-08-22 17:45 -- this machine does not have 32 GB of usable RAM, and one terminal window holds 7 GB of the missing part
+
+The previous entry closed with the physical ledger failing to balance by 9 to 14
+GB and said the discriminating test would be whether that gap stays constant
+while available memory swings. It does, and the answer is more specific than
+expected.
+
+#### The gap does not move
+
+A 30-minute sampler at 10 s cadence, 33 samples, computing the ledger from a
+single batched PDH query each time:
+
+```
+series          min       p50       max     range
+availMB       1,126     1,891     2,327     1,201
+gap (private) 13,769   13,822    13,856        87
+gap (total)    9,079    9,328     9,608       529
+gpuShared     9,904     9,914     9,934        31
+gpuCommit    11,492    11,498    11,499         7
+gpuDedicated      0         0         0         0
+wsPriv       10,192    10,611    11,140       948
+poolNP        2,469     2,486     2,496        27
+```
+
+Available memory swung by 1,201 MB. Process private working sets swung by 948
+MB. The gap moved by 87 MB -- 0.6% of its own size. Whatever holds those pages
+is not participating in the trimming at all. That is the signature of a locked,
+non-pageable allocation, and it is the first thing in this investigation that
+survives the perturbation discipline the WSL retraction imposed: two quantities
+were compared while a third moved, rather than two constants being matched to
+each other.
+
+The two bounds differ because `\Process V2(_Total)\Working Set` counts shared
+pages once per mapping process and so over-states the named side. The truth is
+between 9,079 and 13,856 MB. Call it 9 to 14 GB, and note that even the
+optimistic end is 28% of the machine.
+
+#### Who holds the GPU memory
+
+The adapter reports 11,498 MB committed with **dedicated usage of exactly
+zero**. On an integrated Arc 140T there is no separate VRAM, so every one of
+those megabytes is system RAM held by the display driver. By process:
+
+```
+WindowsTerminal        pid 17692    6,999 MB
+dwm                    pid 67732    1,881 MB
+chrome                 pid 68280      804 MB
+Cloudflare WARP        pid 58768      338 MB
+explorer               pid 15060      271 MB
+csrss                  pid  2144      240 MB
+Slack                  pid 11980      208 MB
+Akiflow                pid  8880      200 MB
+Telegram               pid 56632      198 MB
+...
+TOTAL (holders >50 MB)              12,366 MB
+```
+
+One Windows Terminal window holds 56.6% of the machine's GPU memory. It is the
+same pid 17692 that holds 7,747 MB of private bytes and has been alive for the
+full 20.6-day uptime, and whose sibling instance doing the same job holds 81 MB.
+Whether the 6,999 MB of GPU commit and the 7,747 MB of private bytes overlap is
+not determined -- WDDM shared allocations are made by the kernel driver, not
+charged to the process address space, so they are plausibly additive, but that
+is not measured.
+
+VBS is also running: `VirtualizationBasedSecurityStatus = 2` with security
+services 2, 3, 4 and 5 (HVCI, Secure Launch, SMM firmware measurement, kernel
+stack protection). The secure kernel's VTL1 pages are locked too and appear in
+no VTL0 counter.
+
+#### What is and is not claimed
+
+Claimed, and measured:
+
+- 9 to 14 GB of physical RAM appears in no process working set, no pool counter
+  and no cache counter, and it is invariant across a 1,201 MB swing in available
+  memory.
+- The iGPU holds 11,498 MB of committed memory, all of it shared, none of it
+  dedicated, and on an integrated adapter that is system RAM.
+- One process, WindowsTerminal 17692, holds 6,999 MB of it.
+- VBS/HVCI is running, which locks a further unknown amount.
+
+Not claimed: that the invariant block *is* the GPU commit. Both quantities are
+constant, and correlating one constant against another proves nothing -- that is
+the exact error class this log retracted for the WSL VM. The magnitudes are
+consistent and the mechanism is right, but `RAMMap64`'s Driver Locked row is
+what settles it and that needs elevation.
+
+There is, however, a decisive test that requires no download and no new tooling:
+**sign out and back in, then re-measure.** That destroys WindowsTerminal 17692
+along with its 6,999 MB of GPU commit. If the gap falls by roughly 7 GB, the
+attribution is established by intervention. If it does not, the block is VBS or
+driver memory and the terminal was never the issue. The action being tested is
+the one already recommended for dwm, so the experiment is free.
+
+Limitation: this window landed in the quiet phase of the oscillation. Over the
+25 samples of the concurrent machine series, `Pages Output/sec` was **0.0 in
+every single sample**, disk queue p50 was 0 with a max of 1.0, and page reads
+p50 was 15.5/s against the 6,736/s and 28,440/s peaks recorded earlier. The
+1,201 MB swing in available memory is a real perturbation, but the gap has not
+been observed through a full thrashing episode.
+
+#### What this does to the framing
+
+Every earlier entry in this log has reasoned about "67 GB of commit against 32
+GB of RAM", a ratio of roughly 2.1:1. If 9 to 14 GB is locked and unavailable,
+the working set of everything else has to fit in 18 to 23 GB, and the real ratio
+is 2.9:1 to 3.7:1. That is why available memory sits at 1 to 2 GB and touches
+zero, on a machine that on paper has 32 GB. The overcommit was never being
+measured against the right denominator.
+
+#### Independent confirmation of the dwm escalation
+
+The previous entry's headline came from a subagent. Recomputed here directly
+from `dwm-growth.csv`, 527 rows for pid 67732 (started 08-11 17:59:46, never
+restarted):
+
+```
+day     n   cpu_p50  cpu_p90   p50_ms   p90_ms  pass_p50  pass_min   ms/pass_hot  handles  gpu_local
+08-11  12       5.6      7.2     6.94     7.37     144.0     142.8          0.28    1,742        688
+08-12  48       3.5     14.1     6.94     7.40     144.0     132.7          0.21    1,834        668
+08-13  48      10.0     29.2     6.95     7.74     143.7      98.7          0.49    1,885        605
+08-14  48       8.2     15.8     6.94     7.54     142.8      94.3          0.37    1,907        549
+08-15  48      10.1     21.5     6.94     7.50     142.8     136.0          0.46    1,926        593
+08-16  48      13.7     47.9     6.96     7.83     141.5     118.7          0.59    2,055        961
+08-17  48      23.9     52.2     6.98     8.07     133.1      61.7          1.20    2,216        932
+08-18  48      40.7     58.8     7.16    13.09     120.3      71.8          2.72    2,287        971
+08-19  48      37.1     62.1     7.12    13.09     124.1      90.4          2.34    2,313        880
+08-20  48      23.7     45.5     6.97     7.75     137.1      74.7          1.12    2,305      1,048
+08-21  48      36.4     78.2     7.05    10.16     131.0      70.0          2.13    2,379      1,185
+08-22  35      97.5    105.6     9.47    15.58      96.8      63.3          7.23    2,469      1,644
+```
+
+Every column moves the same way on the same process, and `pass_p50` is the one
+that matters to a human being: the desktop is composing **96.8 frames per second
+today against 144.0 on 08-11**. Handles and GPU-local memory rise monotonically
+alongside, which is what a leak looks like and not what load looks like.
+
+A fresh 12-sample probe of my own at 17:35 found dwm at a p50 of 62.4% of one
+core with a user-mode share of 84-100% (median ~92%), `Page Faults/sec` flat at
+146-204, and `IO Read Operations/sec` of exactly 0 in all 12 samples, while
+`% Processor Performance` read 146.3% of nominal -- so the CPU is turboing and
+the percentage is not inflated by downclocking. The level is episodic and lower
+than the 95% daily median, which is consistent with the bimodality already
+recorded; the mechanism -- user-mode compute, not fault servicing -- reproduces
+exactly.
+
+#### Two more instrument failures, both mine, both the same shape
+
+**One.** The collector's first sweep wrote `privMB=0` for all 45 processes. The
+counter is fine -- `\Process V2(dwm:67732)\Private Bytes` returns 957,394,944
+when asked directly, and every subsequent sweep recorded real values. The first
+batched query simply did not return that counter, and because the code read the
+absent key as `[double]$null`, it silently became zero. Same shape as
+`Get-Process` returning 0.00 for a protected service, except this time it was in
+code written *after* that lesson was published.
+
+**Two.** The summary that read the collector back reported `privMB = 0` for
+every process on the machine, including the sweeps that had good data. Cause:
+`Group-Object` returns its `.Group` as a `Collection[PSObject]`, and negative
+indexing (`$_.Group[-1]`) returns `$null` on that type rather than the last
+element. `[int]$null` is 0. A whole column of zeros, from an indexing idiom that
+works on arrays.
+
+Both are the same failure: a value that could not be obtained was rendered as
+zero, in a language that will not raise for either case. The output column has
+been changed to emit `-1` for "counter absent in every sweep" so the two states
+are distinguishable on sight.
+
+#### And I am part of the load again
+
+From the same seven sweeps, mean percent of one core:
+
+```
+idle:0                        1,029.6      (10.3 of 16 cores idle)
+claude:56620                    109.3   max 182.1   priv 4,964 MB
+pwsh:78716                       97.4   max 171.1   <- my collector
+dwm:67732                        69.3   max 118.9
+pwsh:22516                       65.2   max 177.5   <- my probe shell
+system:4                         49.5   max  76.7
+msmpeng:46428                    49.0   max 134.2   priv 715 MB
+claude:29932                     32.0   max  50.1
+```
+
+My own two shells account for 162.6% of a core, more than dwm and more than
+Defender. A `Get-Counter` sweep of six counters across roughly 500 `Process V2`
+instances is not cheap, and the first such sweep took 75 seconds to return. That
+75-second stall is the same phenomenon as the 164-second enumeration stall found
+in the older sampler -- and it is, again, the clearest direct measurement of the
+symptom being investigated.
+
