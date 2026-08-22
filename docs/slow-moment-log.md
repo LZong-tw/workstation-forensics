@@ -4301,3 +4301,182 @@ One incidental figure worth recording: `\Memory\Modified Page List Bytes` read
 44 MB at 23:22 and 15 MB at 23:32. Whatever that counter tracks, it is not a
 quantity that has been sitting at 8 to 9 GB and climbing all evening.
 
+
+### 2026-08-23 00:14 -- the previous entry measured the investigation, not the machine
+
+The entry above named a static block and a growing block, called a pre-registered
+test passed, and ended with a recommendation to restart a terminal for 6.8 GB.
+Review, plus four checks run directly against the machine, killed most of it. The
+corrections are recorded here rather than by editing the entry, per this log's
+practice.
+
+#### The window was contaminated, and the contaminant was this session
+
+```
+pid 17692        23:32        23:55        00:14
+working set     557 MB       782 MB      1,155 -> 1,159 MB   (+2 MB per 3 s, watched live)
+private commit  7,761 MB    7,762 MB     7,763 MB
+handles          1,374       1,374        1,371
+```
+
+**Private commit moved 2 MB in 42 minutes. The working set doubled.** The process
+is not allocating anything; its pages are being faulted back into its working set,
+and what is faulting them is this investigation typing into that terminal. The
+observed Private growth rate over the sampled interval was **809 MiB/h against a
+lifetime average of 13.6 MiB/h -- a 60x excursion**, and it is still running at
+roughly 2,400 MiB/h while these words are written.
+
+So the 25-minute interval used in the previous entry is not a sample of pid 17692's
+behaviour. It is a sample of pid 17692 being hammered by the instrument. The parent
+chain has been in this log twice already; this is the first time it invalidated a
+measurement rather than merely embarrassing an attribution.
+
+#### The pre-registered test: I moved the goalpost
+
+The registration was explicit and the quantity is unambiguous -- reading 1's
+Modified column is 6,419,680 KB = **6,269.22 MiB**, matching the registered
+"~6,269 MB" exactly:
+
+> If pid 17692's Modified is still ~6,269 MB while the machine-wide figure has
+> climbed, its block is static [...] If pid 17692's figure has climbed with the
+> total, the GPU story is dead.
+
+The outcome was **5,996.64 MiB, a 4.35% fall** -- neither branch. The previous
+entry reported the verdict on the **Total** column instead, +0.91%, and called it
+static. A registered quantity that moved down was reported as a different quantity
+that moved up. Compounding it: **no tolerance was registered**, so "passed" was
+unfalsifiable from the start. And the same 25-minute delta was used twice -- once
+to declare the test passed, and again to generate the migration story that explains
+the very 273 MiB fall the substitution concealed. Confirmation and
+hypothesis-generation cannot come from one dataset.
+
+#### Retracted: "the static block and the growing block are different processes"
+
+Strip the disputed Modified column and recompute the same interval on
+`Private + Standby + Page Table`:
+
+```
+                   R1          R2        change
+17692 non-Mod   515,604 K   857,824 K    +66.4%
+dwm   non-Mod   167,836 K   207,044 K    +23.4%
+```
+
+**The verdict inverts.** On the columns that are not in dispute, pid 17692 is the
+faster grower. The dichotomy was an artifact of a column that constitutes 88-93% of
+17692's total and carries an unresolved 200x conflict. In absolute terms dwm grew
+128,368 KB against 17692's 63,100 KB -- dwm grew *twice as much*, not less. And
+"static" is a claim about variance; n=2 has zero degrees of freedom for it.
+Pre-registration protects against post-hoc metric selection. It does not add
+samples.
+
+#### Retracted: "dwm is the accumulator"
+
+dwm's Total grew 128,368 KB in ~25 minutes = **301 MiB/h**. Sustained over the
+4.17-hour monotone window that figure was offered to explain, that is 1,255 MiB.
+**dwm's entire footprint is 641 MiB.** Backwards-extrapolated, dwm had negative mass
+at 19:40. This is oscillation, and dwm's own GPU commit series is non-monotone
+(1,881 -> 1,857 -> 1,833 -> 2,043), which was already direct evidence that one
+positive dwm difference establishes nothing.
+
+Nor was the field enumerated: 7 rows in reading 1, 8 in reading 2, out of 496
+processes -- Telegram appears only in the second, proving the two readings are not
+the same row set but hand-copied top-N slices of a sorted view. **dwm was
+identified because dwm was looked at.** No replacement accumulator is named here,
+because naming one would repeat the same error in reverse.
+
+To be explicit, since dwm remains this log's primary finding: **the slowness result
+is untouched.** 7.23 ms per compositor pass against 0.712 ms measured on a freshly
+started dwm is the one controlled comparison in this entire investigation -- it has
+a baseline. It does not need, and must not be joined to, a memory claim. One process
+appearing in two symptom lists is not one mechanism.
+
+#### Retracted: "6.8 GB resident, 6.0 GB outside any working set"
+
+This was offered as the statement that survived regardless of the disputed column.
+It does not. `Total - PageTable - Modified` = **820.2 MiB** against a 782 MB working
+set -- once the disputed column is removed the finding collapses to a rounding
+error. The `PrivateMemorySize64` corroboration does not rescue it, because
+7,762 MB is **commit**. With ~36 GB of system commit not resident, "17692's 7.7 GB
+is largely pagefile-backed" remains fully alive and predicts the opposite.
+
+Also corrected: the subtraction `6,817 - 782` crosses two instruments and two
+clocks, and **its sign flips between readings** -- RAMMap's Private column is
+482.1 MiB at reading 1, below the 782 MB working set, and 819.3 MiB at reading 2,
+above it. There is no containment relation to subtract across.
+
+#### Two more corrections
+
+**Per-process GPU committed figures are not additive.** Summed across all
+instances: 12,639 MB, against an adapter Shared Usage of 10,120 MB at the same
+moment -- 25% over. Cross-process shared surfaces are counted once per referencing
+process. Any total built by adding those rows, including earlier ones in this log,
+is inflated by an unknown amount.
+
+**Scrollback is refuted as the mechanism**, so it should not be offered as the
+competing hypothesis. `settings.json` has no `historySize` key, so the default of
+9,001 lines applies; five panes at that depth is order 10^2 MB, and the OpenConsole
+children hold 3 / 11 / 252 / 3 / 2 MB. Two orders of magnitude short.
+
+#### What actually survives tonight
+
+1. **pid 17692 holds 7,763 MB of private commit after 502 hours of uptime, and
+   that figure is frozen.** Commit, not residency. Independent instrument.
+2. **System commit is 67,947 MB against 31,997 MB installed -- 2.12x, with
+   1,048 MB available.** Independent of every disputed column.
+3. **dwm's compositor pass has degraded ~10x against a fresh-dwm baseline.**
+4. RAMMap's Private column agrees with `WorkingSet64` (819.3 MiB vs 782 MB, gap in
+   the expected direction since WorkingSet64 includes shareable pages). This is a
+   real cross-instrument agreement, unlike the magnitude matches elsewhere.
+5. RAMMap resident-private 6,816.9 MiB is <= `PrivateMemorySize64` 7,762 MB. A
+   constraint check that passes; consistency only.
+6. **A second instrument conflict, new tonight and logged unexplained:** RAMMap's
+   Processes tab and its Use Counts tab moved in *opposite directions* over this
+   interval. Summed Modified across the sampled rows fell 262-385 MiB while Use
+   Counts reported the Modified total rising monotonically at +139 MB/h through the
+   same evening.
+
+#### The next measurement, with its constraints earned
+
+**One full RAMMap export -- all 496 process rows plus the Use Counts tab from the
+same F5 snapshot -- driven from a session outside pid 17692, with
+`\Memory\Available Bytes`, `Committed Bytes`, `Modified Page List Bytes` and the
+`Standby Cache *` counters sampled within seconds of it. Before any restart.**
+
+Each constraint is earned by a specific failure above: **outside 17692** because of
+the 60x excursion; **full export rather than hand-copied top-N** because Telegram's
+appearance proves the row set was not fixed; **before the restart** because a
+restart destroys both this capture and the fresh-terminal GPU baseline.
+
+The discriminating check it enables is not "the table sums to 31,997 MB" -- that is
+near-vacuous, since a mis-decode that shuffles pages between columns preserves the
+total exactly. It is: **Use Counts `Standby + Zeroed + Free` must equal
+`\Memory\Available Bytes` at the same instant.** Agreement on three of eight
+page-state columns makes a 200x error on a fourth hard to sustain; disagreement
+condemns the decode outright.
+
+#### The restart, restated as an experiment rather than advice
+
+The previous entry recommended restarting the terminal to recover 6.8 GB. That is
+the wrong quantity and the wrong sequence. Restated:
+
+> Restarting the pid 17692 tree releases roughly **7.7 GB of commit charge**. The
+> Available-memory delta is **unknown, and is the test**. Record before and after:
+> `\Memory\Available Bytes`, `Committed Bytes`, `Modified Page List Bytes`, GPU
+> Adapter Shared Usage, and a full RAMMap Use Counts capture.
+>
+> - **Available rises ~6.8 GB** -> RAMMap's Modified column is measuring real
+>   resident memory.
+> - **Available rises under 1 GB while Committed drops ~7.7 GB** -> the block was
+>   pagefile-backed, the column is an artifact, and everything built on it in the
+>   last two entries falls in one stroke.
+>
+> *Open assumption:* the dichotomy is clean only if a terminating process's dirty
+> private pages are released rather than written back. That is the expected
+> behaviour for pagefile-backed private pages on process exit, but it was not
+> verified here; if writeback occurs, the low branch is ambiguous between "artifact"
+> and "flush latency", and the reading must be taken after the modified page writer
+> drains.
+
+Any memory recovered attributes to the **tree** -- five pwsh, five OpenConsole and
+a wsl.exe -- not to WindowsTerminal alone.
+
