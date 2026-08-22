@@ -2987,3 +2987,388 @@ and every measurement answering one has been a sample from one phase of that
 oscillation, which is a better explanation for why the conclusions kept
 changing than any of the individual corrections was.
 
+
+### 2026-08-22 17:30 -- eight dimensions in parallel, and the answer was not the one this log spent three weeks measuring
+
+Every entry above this one investigates one thing at a time. This entry is the
+result of running eight independent investigations concurrently -- commit
+ledger, the Chromium fleet, Defender, resident software inventory, Windows
+Search, storage and the pagefile, the compositor, and this log's own record --
+and then ranking what came back. Eight of eight reported: 94 findings, 233 tool
+invocations, 29 minutes of wall clock.
+
+The ranking inverts this log's working assumption.
+
+#### The headline: dwm, not memory
+
+`dwm.exe` (pid 67732, started 2026-08-11 17:59:46, never restarted) has gone
+from 37.9% of one core on 08-20 to a median of 95-98% of one core today. Two
+instruments that share no code agree:
+
+```
+                       08-19   08-20   08-21   08-22
+load-attrib2.csv        37.6    31.4    41.4    95.4   dwm p50, %-of-one-core
+  (15 s cadence)       n=3136  n=5496  n=5410  n=3855
+dwm-growth.csv          37.1    23.7    36.4    97.5   dwm cpu_pct daily median
+  (30 min cadence)      n=48    n=48    n=48    n=34
+machine p50, same days  38.2    30.7    27.3    28.2
+```
+
+Read the last row again. The machine got *quieter* while dwm tripled. Hour by
+hour the rise is a staircase, not a ramp: 08-21 00:00-08:00 dwm sits at 27-31%
+with the machine at 18-22%; by 08-21 15:00 dwm is at 63-79%; from 08-22
+01:00-09:00 dwm is at 95.7-100.7% with the machine at 23.7-28.7%. dwm is at its
+most expensive during the machine's quietest hours, which is the opposite of
+what "dwm is slow because it is being paged" predicts.
+
+Four more measurements close the consequence branch:
+
+- **It is compute, not fault servicing.** Over 18 samples at 2 s: `% User Time`
+  is 86.5-96.9% of `% Processor Time`, median ~90%. `Page Faults/sec` is
+  143-160, dead flat, against machine-wide transition faults of 1,763-32,887 in
+  the same samples. `IO Read Operations/sec` is 0 in all 18. Private bytes and
+  private working set are both pinned -- no trim/refault sawtooth. A thread
+  blocked on a hard page read accrues zero CPU time, and fault servicing bills
+  to kernel mode; neither shape matches.
+- **Heavy paging does not degrade composition.** 2,400 measured composition
+  intervals over 17:00:35-17:01:01 delivered 139.0-143.0 passes/sec against a
+  144 Hz panel, p50 6.94-6.98 ms against a 6.944 ms vsync period -- while
+  `\Memory\Page Reads/sec` in the same bursts ran 1,923 / 2,984 / 4,568 / 4,074
+  / 4,794 / 4,280 / 4,223 / 3,823.
+- **The cost tracks dwm's own uptime.** Median CPU-ms per composition pass on
+  the hot thread, by day, over 526 samples of this one process: 0.28, 0.21,
+  0.49, 0.37, 0.46, 0.59, 1.20, 2.72, 2.34, 1.12, 2.13, 7.23. A fresh dwm 41
+  minutes after restart measured 0.712. Handle count rises about +2.7/hour and
+  `gpu_local_mb` p50 rose 668 -> 1,644 MB over the same days.
+- **It is episodic, and in episodes one thread caps the whole desktop.** Split
+  today's 34 samples on the sampler's own calibrated threshold: GOOD n=9,
+  122.7-144.1 passes/sec; BAD n=25 (74%), 63.3-111.6 passes/sec. On the worst
+  sample the hot thread was at 95.8% of one core and 15.129 ms per pass, which
+  predicts a ceiling of 66.1 passes/sec; measured was 63.3.
+
+Even in the good mode dwm burns 0.90 of a core while hitting every vsync -- 3.97
+ms of CPU per pass against a fresh dwm's 0.712 ms. This is the MPO
+overlay-candidate occlusion walk already localised in `dwm-investigation.md`,
+now four times worse than when that document was written, and it is the best
+available explanation for "the desktop feels slow" that this investigation has
+produced.
+
+What is still not known: what changed at approximately 08-21 15:00 and again at
+08-22 01:00. Nothing in the event log, the Chrome Remote Desktop state, or the
+window counts explains either step. And the pruning-failure-versus-iterator
+question the dwm doc left open is still open; the PMC run that would settle it
+has not been repeated at the current, much worse level.
+
+#### The memory story is real but it is not what is being felt
+
+It is real: commit 67.7 GB against 31,997 MB of RAM, available memory
+oscillating between 481 and 2,752 MB with two reads of exactly 0.0, page reads
+peaking at 28,439.8/sec with `Pages Input/sec` at 83,487.8 (326 MB/s) and
+`PhysicalDisk(1 c:)\Disk Read Bytes/sec` independently reading 332.3 MB/s in the
+same window -- two unrelated counter sets agreeing to within 2%. C:'s read
+latency collapses from a measured QD1 floor of 144.1 us to 2,080 us p50 and
+14,550 us p90 once its queue exceeds 4.
+
+But it has been tested against the felt symptom three times in this log and
+failed three times, and no entry ever acknowledged it:
+
+1. 08-19 16:44: all 21 visible top-level windows answered `WM_NULL` in 0.2-16.4
+   ms, at 62 GB commit and 8-24% residency -- materially the same overcommit as
+   now.
+2. Of 83 recorded stalls in the 08-18/08-19 per-window tables, 41 have
+   `fgfault < 100`, and the seven *worst* stalls have `fgfault = 0`.
+3. The largest `fgfault` ever recorded, 1,121,064, produced a `max_ms` of only
+   190.
+
+The honest position is that the mechanism is refuted in its message-pump form
+and merely untested in its repaint form. The 08-22 entry above states "Every
+switch to one of those windows is a burst of hard faults. That is the felt
+symptom." **That sentence is not supported.** Measuring time-to-first-paint on
+window activation, rather than message-pump latency, is the cheapest open test
+left in this investigation.
+
+#### Where the commit actually goes, and the vendor-bloatware hypothesis dies
+
+496 processes, 49,514 MB of process private bytes, 26.7% resident overall.
+Grouped:
+
+```
+Windows Terminal host      8,103 MB    13.0% resident    9 procs
+MCP / dev tooling          7,528          9.9%          85
+Google Chrome              7,128         30.7%          47
+Claude Code + Desktop      7,093         52.5%           4
+Windows OS and other       6,020         34.1%         218
+WSL2                       1,654         32.2%           7
+LINE                       1,453         16.8%           4
+Logitech Options+          1,351          4.7%           5
+Slack                      1,328         23.3%           7
+PowerToys                    995         11.7%          12
+Telegram                     994          2.6%           1
+...
+ASUS + iGo                   272         22 procs
+```
+
+The pre-selected suspect is exculpated. All 22 ASUS/iGo processes together hold
+272 MB -- 0.55% of process private bytes. PowerToys alone holds 3.7x more.
+
+The agent tooling holds 23,438 MB, 47.3%, across 131 processes. Two components
+dominate:
+
+- **WindowsTerminal pid 17692 holds 7,747 MB private** at 13.1% resident,
+  started 08-02 02:09:14 -- the full 20.6-day uptime. A sibling Windows Terminal
+  doing the same job holds 81 MB. That is a 96x ratio between two instances of
+  the same image. The obvious explanation was checked and eliminated:
+  `settings.json` contains no `historySize` key at any level, so the default
+  9001 lines/tab applies, which at the configured 147 columns is roughly 26 MB
+  per tab and about 160 MB for six tabs -- 48x smaller than observed. This is
+  accumulation, not configuration, and the mechanism is undetermined.
+- **91 MCP server processes holding 7,229 MB across three to five simultaneous
+  generations** for three live sessions: serena 18 procs / 2,466 MB / 5
+  generations dated 08-08 through 08-22; semble 14 procs / 1,774 MB / 3
+  generations today alone; mcp-remote 16 procs / 946 MB / 5 generations;
+  playwright 12 procs / 732 MB; headroom 9 procs / 661 MB. Roughly 10.0%
+  resident. Keeping only the newest generation of each is worth about 2,560 MB.
+
+Both of these consume commit while sitting almost entirely on the pagefile.
+That is the mechanism by which they hurt: they are not producing page reads,
+they are consuming the commit that forces everything else to be trimmed.
+
+Cold consumer apps add 5,002 MB at 2-17% residency -- Telegram at 994 MB and
+2.6% resident is the coldest large holder on the machine.
+
+#### The ledger does not close: 9 to 14 GB of physical RAM cannot be named
+
+Measured directly at 17:26:59 with a batched PDH query, all figures MB:
+
+```
+available (free 295 + standby 1,066)          1,362
+modified page list                               55
+process working sets, private only           11,053
+process working sets, incl. shared           15,845   (over-counts shared)
+pool nonpaged                                 2,474
+pool paged resident                           2,226
+system driver resident                           44
+system cache resident                           894
+system code resident                             12
+------------------------------------------------------
+named, using private working set             18,120   gap 13,877  (43.4%)
+named, using total working set               22,912   gap  9,085  (28.4%)
+physical                                     31,997
+```
+
+The internal consistency check passes -- free 295 + standby 1,066 = 1,361
+against `Available MBytes` 1,362 -- so this is not a broken query. Between 9.1
+and 13.9 GB of this machine's RAM is held by something that appears in no
+process working set, no pool counter and no cache counter.
+
+The leading candidate is the integrated GPU: on an iGPU, WDDM "shared" memory
+*is* system RAM, and adapter Shared Usage has been observed at 9,991-9,998 MiB.
+That is a suspiciously good numerical match and it is deliberately **not** being
+claimed here, because every GPU counter available unelevated is a commit
+counter, and matching two numbers is not evidence -- this log has already
+published one retraction produced by exactly that error. The discriminating test
+now running is whether the gap stays constant while available memory swings
+between 1,120 and 2,752 MB. A gap that holds steady through that swing is the
+signature of a locked allocation; a gap that swings by gigabytes means the
+ledger itself is wrong. `RAMMap64`'s Driver Locked category is what actually
+closes it, and it needs elevation.
+
+#### Storage: not a capacity problem, and half the paging cannot be relocated
+
+Both NVMe drives measure the same QD1 4 KB random-read floor once the address
+span is matched -- C: p50 144.1 us over n=480, D: p50 151.8 us over n=480. An
+apparent 2x difference on a first pass was an FTL-cache artifact from comparing
+a 377 MB span against a 31 GB span on DRAM-less drives. C: is not a slow device;
+it is a queued one, carrying 93.9% of all read bytes and 100% of pagefile I/O.
+
+The correction worth recording: **at least 47.6% of the hard-fault read volume
+is file-backed, not pagefile.** In the cleanest window (n=40 x 1 s),
+`Pages Input` totalled 653.0 MB while `Pages Output` was *exactly zero pages*
+and pagefile usage stayed flat. 653 MB came in with nothing going out, so those
+pages were clean file-backed -- EXE/DLL code and mapped data being trimmed and
+re-read from source. Pooled over 135 seconds, `Pages Input` 3,028.3 MB against
+`Pages Output` 1,586.7 MB bounds the pagefile share of page-in at <=52.4%.
+
+This also explains an earlier puzzle in this log. The entry that found 97.6 MB/s
+of disk read against only 15.3 MB/s of process file I/O attributed the residual
+to the pagefile. Roughly half of it was mapped-file paging, which per-process IO
+counters cannot see at all. No pagefile relocation helps that half; only freeing
+physical RAM does.
+
+A supporting detail that matches the felt experience better than any throughput
+number: both drives pay a wake penalty on the first read after a few seconds of
+idle. C: 443-2,746 us, D: 1,472-8,567 us, against warm QD1 p50 of 144 and 152
+us. The counter evidence agrees -- pooled samples in the near-idle band
+q[0,0.05) show p50 520.3 us at 16.6 read IOPS, versus 150.6 us at q[0.2,0.5).
+Latency is *highest when the disk is least busy*. On a machine that oscillates
+between quiet and saturated on a minutes timescale, every transition into a
+burst pays this.
+
+#### A landmine, found by accident
+
+`HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management\PagingFiles`
+contains two entries:
+
+```
+c:\pagefile.sys 0 0
+d:\pagefile.sys 0 0
+```
+
+`D:\pagefile.sys` does not exist and the kernel has no paging-file instance for
+it -- `Win32_PageFileUsage` lists only C:. The Memory Management key was last
+written 2026-08-22 10:02:43, twenty days after boot, so the change is staged and
+pending a reboot.
+
+`0 0` means system-managed. On this machine's own precedent that targets
+approximately 3x RAM: C:'s pagefile grew to 91,467 MB = 2.859x RAM on a volume
+with 214 GB free, so the RAM multiple bound it, not free space. D: has 99.99 GB
+free. A system-managed pagefile on D: pursuing the same target would leave that
+volume with roughly 6.25 GB free.
+
+**This must be changed to a fixed size before the next reboot**, in System
+Properties > Advanced > Performance > Virtual Memory. This matters immediately
+because the leading recommendation below is a session cycle, which many people
+perform as a reboot.
+
+For the record, the C: pagefile itself is not a problem and must not be shrunk
+below about 64 GB: it is 91,467 MB allocated, 9,339 MB in use right now, but
+`PeakUsage` is 63,322 MB. A smaller pagefile would have produced allocation
+failures during that peak.
+
+#### Cleared, with the measurement that cleared them
+
+- **Windows Search is not looping.** Two identical gather-time queries 11m43s
+  apart: overlap 2000/2000 URLs, brand-new items 0, items with a later gather
+  time 4 -- and all four had genuinely changed on disk, three of them created by
+  this investigation. Its cost is 1.33% of the 16-core machine, 1.43 MB/s mean
+  read, 363 MB of commit. Two real observations survive: 99% of recent indexing
+  work is directory metadata in a Dropbox online-only placeholder tree (198 of
+  200 sampled items carry `DIRECTORY|REPARSE_POINT|UNPINNED` and 199 of 200 had
+  not changed in 24 h), and `C:\Users\LZong\pipx` (63,647 items) plus
+  `node_modules` (9,275) are in scope with no exclusion rule. `C:\dev` and
+  `Projects` are already out of scope with zero indexed items.
+- **Defender is not in a re-detection loop.** Nine detections in 85 days, eight
+  of them the same JPG inside a deliberately-collected IR sample package under
+  Downloads. Zero detections referencing `.claude`, `node_modules`, `C:\dev` or
+  `C:\WSL`. But see the reopening below.
+- **The ASUS stack is 272 MB.** Removing all 22 processes would return 0.55% of
+  the commit charge.
+- **Nothing is flapping.** Three Service Control Manager events in 48 hours,
+  zero 7031/7034 unexpected terminations, zero rows at Critical or Error level
+  from any provider. The 127 Windows Error Reporting messages are not a crash
+  loop -- 125 carry an empty bucket.
+- **Free space is adequate everywhere** and TRIM is enabled on both drives.
+
+#### Reopened
+
+**Defender was closed on 36 samples over 3 minutes; three days of data say
+otherwise.** Across 17,897 windows it is the only process whose CPU rises
+monotonically with machine load in both presence and level:
+
+```
+machine load    presence in top-6    MsMpEng p50, %-of-one-core
+0-20%                  4.0%                    9.6
+20-30%                41.5%                   20.2
+30-40%                77.3%                   33.8
+40-50%                91.3%                   54.3
+50-60%                95.5%                   76.9
+60-70%                94.9%                   93.9
+70%+                  95.4%                   68.5
+```
+
+For contrast, `claude` is flat across the same buckets -- 93.0 / 98.9 / 101.4 /
+100.5 / 98.4 / 94.9 / 77.1. It is a constant one core and it is *not* what
+varies between quiet and saturated.
+
+This does not establish causation and probably cannot: Defender scanning is
+plausibly driven by the same file I/O that drives the load. What it establishes
+is that the closure was not supported by the data that was already on disk.
+
+#### Three instrument failures, which is the transferable part
+
+**Per-process CPU attribution loses 56% of the machine in exactly the windows
+that matter.** `proc_total` is the process subsystem's `_Total` including Idle
+and must equal 16.00 cores. It degrades monotonically with load: 15.88 at 0-20%
+machine load, 14.33 at 40-50%, 11.76 at 60-70%, **7.03 at 70%+**. Unattributed
+cores rise 0.20 -> 7.16 across the same buckets while DPC+ISR stays flat at
+0.09-0.23, so this is not interrupt time going missing. Part of the mechanism is
+visible in the logger's own source: `if ($dt -le 0) { continue }` silently drops
+any process whose counter timestamp did not advance, contributing 0 to the
+accounting -- which is this log's own "unreadable is not zero" error,
+reproduced inside the instrument that was built to fix the attribution gap.
+
+**The sampler stalls for up to 164 seconds.** A pure counter enumeration whose
+p50 is 434 ms took 164,611 ms. That 380x stall is itself the clearest single
+measurement of the felt symptom anywhere in this dataset. It also biases every
+row count above, including the buckets in this entry: a row covering 164 s of
+wall time is counted the same as a row covering 15 s, so saturated episodes are
+systematically under-represented.
+
+**Absence of alarm was read as absence of excursion.** The 08-16 entry's
+reassurance -- "all inside the healthy band, no trap fire since 2026-08-13" --
+was never evidence. Since 08-19 the raw dwm series contains 57 threshold
+excursions on p50_ms/p90_ms (45 and 50 respectively, 32% of samples) and the
+trigger log recorded zero fires on those signals. The only two fires it did
+record are on metrics the dwm document explicitly retracted.
+
+And one error class this log has never named: **reverse causality is never
+labelled anywhere in the record.** On a 2:1-overcommitted host a process that
+burns CPU may be a victim of the memory state rather than a contributor to it.
+The 08-21 entry writes "dwm 37.9% -- the known dwm degradation" with no check
+that the machine's state explains the number. The log gets it right exactly
+once, for Memory Compression, which it correctly calls a symptom by definition.
+The cheap general fix is the control used for dwm at the top of this entry:
+compare a process at *matched* machine-load levels, not across them.
+
+#### The eight instruments this investigation built and never read
+
+`load-attrib2.csv` is 3,434,602 bytes, 17,897 rows, running continuously since
+2026-08-19 10:20 -- built specifically to close this log's own stated gap, "the
+logger still does not record per-process attribution at those moments, so that
+remains unidentified." No entry ever analyses it. The same is true of
+`ui-response.csv` (1,568,287 bytes, live) and of `dwm-growth.csv` since 08-16.
+
+Every finding in this entry about dwm's escalation, about Defender's load
+correlation, and about the attribution gap came from data that was already on
+disk, at zero additional cost to a machine that has 1.1 GB of RAM available.
+
+#### What to actually do, in order
+
+1. **Fix the staged D: pagefile to a fixed size before rebooting.** Prerequisite,
+   not optional.
+2. **Sign out and back in.** This is the dwm fix -- nothing short of restarting
+   the compositor resets the walk cost, and closing apps does not do it. It is
+   simultaneously the largest memory reclaim available: WindowsTerminal 17692's
+   7,747 MB, the three claude sessions' 7,068 MB, and the 91 MCP processes'
+   7,229 MB all go with it. It also ends this investigation's own three live
+   sessions, which is why it is stated as a decision rather than listed as a
+   cleanup step.
+3. **Do not run more than one long-lived agent session at a time.** Three
+   sessions aged 12-14 days, each with a full MCP stack, plus a 20-day terminal
+   host, is 30.6% of all process private bytes on the machine.
+4. **Remove the cold consumer apps from autostart** -- Telegram, LINE,
+   Logitech Options+ (service-launched, so the service needs disabling rather
+   than a Run-key edit), Akiflow, and one of the two always-on VPNs. About
+   5,002 MB of commit, but note the residency: these pages are already on the
+   pagefile, so the visible gain in available memory will be far smaller than
+   the commit relief.
+5. **Exclude `pipx` and `node_modules` from Windows Search.** Small, but free.
+
+Deliberately *not* recommended: uninstalling the ASUS suite (272 MB), shrinking
+the C: pagefile (returns disk, lowers the commit limit below the observed
+63,322 MB peak), moving the pagefile to D: for speed (identical device floor),
+and disabling Chrome Remote Desktop (the event log shows it is in use).
+
+#### Still open
+
+- What changed at 08-21 15:00 and 08-22 01:00 to step dwm's floor up twice.
+- Whether the 9-14 GB unnamed physical block is the iGPU. Needs `RAMMap64`
+  elevated.
+- Whether WindowsTerminal 17692's 6,734 MB of paged-out private bytes is ever
+  touched. If it is, it is also a page-read source; if not, it is purely a
+  commit consumer.
+- The repaint form of the felt-symptom hypothesis, which no entry has tested.
+- Disk wear, temperature, SMART, and BitLocker state on both drives: all
+  returned access-denied unelevated, and `Get-PhysicalDisk HealthStatus=Healthy`
+  is a coarse operational flag that says nothing about NAND wear.
+
