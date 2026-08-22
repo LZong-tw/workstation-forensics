@@ -3702,3 +3702,153 @@ My two shells are the single largest attributable consumer in the window, ahead
 of the Claude session, dwm and Defender. Any reading of this table has to
 subtract them first.
 
+
+### 2026-08-22 19:15 -- elevated, and the most useful result is a negative one
+
+An elevated read-only probe answered five questions that had been sitting as
+UNKNOWN because unprivileged queries returned refusal strings, nulls or zeros.
+Two of the answers change the picture.
+
+#### The gap is not a permissions artifact
+
+The obvious objection to "9 to 14 GB of RAM cannot be named" was that this
+session cannot see everything -- 60 of 496 processes reported `user=UNREADABLE`,
+and this log has already documented four separate shapes of unprivileged
+blindness. So the ledger was recomputed from an elevated session, and then again
+unelevated five minutes later:
+
+```
+                     elevated 19:07     unelevated 19:12
+available                   1,639              1,788
+modified                       27                 25
+kernel resident             6,412              6,426
+process WS private         10,701             10,858
+process WS total           13,713             13,723
+GAP, private basis         13,218             12,900
+GAP, total basis           10,206             10,036
+committed                  62,065             61,556
+```
+
+Identical within five minutes of drift. **Elevation reveals nothing.** The block
+is not processes this session could not read; every counter in the ledger
+reports the same values to an administrator as to an unprivileged caller. That
+kills the cheapest alternative explanation and leaves driver-locked pages, the
+GPU, and VTL1 as the candidates. The GPU numbers reconfirm at the same moment:
+adapter shared 10,004 MB, adapter dedicated 0 MB, WindowsTerminal 17692 still at
+6,999 MB, 11,871 MB across all holders above 50 MB.
+
+This is worth stating as a rule, because this log has spent weeks on the
+opposite failure: **"unreadable is not zero" has a converse, and it also needs
+testing.** Not every gap is a permissions problem. The way to tell is to run the
+same query from both sides and compare, which costs one elevated shell.
+
+#### BitLocker is on, and nobody in this investigation knew
+
+```
+磁碟區 C: [OS]
+    BitLocker 版本:  2.0
+    轉換狀態:        僅加密已使用空間完成
+    加密百分比:      100.0%
+    加密方法:        XTS-AES 128
+    保護狀態:        保護開啟
+    金鑰保護裝置:    TPM, 數字密碼
+```
+
+Every hard page fault served from C: is an XTS-AES-128 decryption, and C: serves
+100% of the pagefile and 93.9% of all read bytes. At the measured peak of
+332 MB/s this is not free. With AES-NI, XTS-AES-128 runs on the order of 1 to
+4 GB/s per core, which puts the decryption cost somewhere around 10-30% of one
+core at that peak -- **an estimate from a published throughput range, not a
+measurement**, and recorded as such. It is charged in the storage stack rather
+than to the faulting process, which makes it a candidate contributor to the
+`system:4` figure of 48.3% of a core measured earlier.
+
+This does not change any recommendation. It is not a bug and turning it off is
+not on the table. It is recorded because the investigation had been reasoning
+about C:'s cost per fault for three weeks without knowing there was a cipher in
+the path.
+
+#### C: reports a 7.5-second maximum read
+
+```
+NVMe Samsung SSD 980 1TB (D:)     Wear 0%  Temp 60 C  ReadLatMax    234 ms  WriteLatMax   212 ms
+NVMe WD PC SN5000S      (C:)      Wear 0%  Temp 60 C  ReadLatMax  7,564 ms  WriteLatMax 4,438 ms
+```
+
+C:'s worst recorded read is 32 times D:'s and 52,000 times its own measured QD1
+floor of 144.1 us. Three caveats, all of which matter:
+
+- These are cumulative maxima over an unknown window, so a single outlier
+  produces the number. They say a 7.5-second read happened, not that it happens
+  often.
+- `StorageReliabilityCounter` latency fields are vendor-reported and their
+  semantics are not guaranteed comparable across two different controllers.
+- `PowerOnHours`, `ReadErrorsTotal`, `WriteErrorsTotal` and
+  `StartStopCycleCount` came back **blank on both drives even elevated**. Blank
+  is unreadable, not zero -- the drives may simply not implement those SMART
+  fields.
+
+What is defensible: the two drives sit in the same machine under the same
+driver, and the one carrying the pagefile reports a worst-case read a factor of
+32 higher. Wear is 0% on both and health is OK, so this is not a dying drive.
+Both report exactly 60 C, which is warm for an idle NVMe and identical across
+two different vendors -- that identity is itself suspicious and the temperature
+should not be leaned on.
+
+#### Memory Compression was on the whole time
+
+`Get-MMAgent` had returned Access Denied, so this had been recorded as UNKNOWN
+rather than off, correctly. Elevated:
+
+```
+MemoryCompression    = True
+PageCombining        = False
+ApplicationPreLaunch = True
+Memory Compression process: pid 4288, working set 341 MB
+```
+
+So the machine has been compressing all along, and the 62 GB commit is a figure
+that already includes whatever compression saved. `PageCombining = False` is
+worth noting -- page combining deduplicates identical pages and would plausibly
+help a host running three Claude Code sessions and 91 MCP servers with heavily
+overlapping images, though whether it would repay its own CPU cost here is
+untested.
+
+#### Defender exclusions, confirmed rather than inferred
+
+Twenty paths. The ones that matter: `C:\dev`, `C:\Users\LZong\.claude\projects`,
+`C:\Users\LZong\AppData\Local\npm-cache`, `C:\Users\LZong\AppData\Local\pnpm`,
+`C:\Users\LZong\pnpmGlobal`, `C:\nvm4w` and the Codex binaries are all excluded.
+The earlier reconstruction from event-5007 records was right.
+
+**`C:\WSL\ext4.vhdx` is confirmed absent from the list**, and so are
+`C:\Users\LZong\node_modules` and `C:\Users\LZong\pipx`. `ScanAvgCPULoadFactor`
+is 50 and real-time monitoring is on. The WSL disk is 79,907 MB and is written
+by every WSL operation; it remains the one defensible exclusion gap, and its
+cost remains deliberately unmeasured rather than assumed.
+
+Two entries carry contextual-exclusion qualifiers embedded in the path string --
+`C:\nvm4w\nodejs\:{PathType:folder}` and
+`C:\Users\LZong\AppData\Local\nvm\nvm.exe\:{PathType:file}` -- each duplicating a
+plain path that is also present. Noted without a verdict: that syntax may be
+Defender's documented contextual-exclusion form rather than a malformed entry,
+and I did not verify which.
+
+#### Elevated is not omniscient
+
+`C:\ProgramData\Microsoft\Search\Data\Applications\Windows\Windows.edb` remains
+unreadable **from an elevated administrator session**. The index database size
+stays unknown. Administrators are not in the ACL; that path is SYSTEM-owned.
+Recorded so the next attempt does not spend another round-trip on it.
+
+#### Unchanged, and still pending
+
+`PagingFiles` still reads `c:\pagefile.sys 0 0 | d:\pagefile.sys 0 0`. The
+system-managed D: entry has not been changed and the reboot risk stands.
+C: is at 8,230 MB current against 91,467 MB allocated and a 63,322 MB peak.
+
+One thing moved on its own and is not explained: committed bytes fell from
+67,857 MB at 17:26 to 61,556 MB at 19:12, about 6.3 GB, with no intervention I
+am aware of. Available memory did not rise correspondingly -- it went 1,362 to
+1,788 MB. Recorded as an observation with no attribution.
+
