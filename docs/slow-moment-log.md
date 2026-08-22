@@ -3852,3 +3852,233 @@ One thing moved on its own and is not explained: committed bytes fell from
 am aware of. Available memory did not rise correspondingly -- it went 1,362 to
 1,788 MB. Recorded as an observation with no attribution.
 
+
+### 2026-08-22 19:35 -- RAMMap arrives, and it takes down more of my own work than anything else in this log
+
+Two entries ago I wrote that 9 to 14 GB of this machine's RAM was locked, that the
+integrated GPU was the leading suspect, and -- explicitly -- that RAMMap's
+`Driver Locked` row was the test that would settle it:
+
+> If it is only a few hundred MB then my attribution is wrong, the gap is in VTL1
+> or somewhere else, and I will retract it here.
+
+RAMMap64, elevated, Use Counts tab:
+
+```
+Driver Locked        613,296 K  =  599 MB
+```
+
+**599 MB. The attribution is retracted.** The pre-registered test fired and it
+failed. That retraction is the only part of this entry that was planned; the rest
+of what follows is the wreckage of the replacement theory I tried to publish in
+its place, which was worse than the thing it replaced.
+
+#### The full table, for the record
+
+RAMMap partitions every physical page into exactly one (usage, state) cell. All
+values in KB as displayed.
+
+```
+Usage             Total          Active        Standby      Modified   ModNoWrite  Transition  Zeroed      Free
+Process Private   19,223,624     11,189,392     220,800     7,813,420       -           12        -          -
+Mapped File        2,480,488      1,075,548   1,404,544         396        -            -        -          -
+Shareable          2,113,340      1,184,360         892     928,088        -            -        -          -
+Page Table           611,888        611,888         -           -          -            -        -          -
+Paged Pool         2,878,592      2,878,024         564           4        -            -        -          -
+Nonpaged Pool      2,912,232      2,912,232         -           -          -            -        -          -
+System PTE           774,432        774,432         -           -          -            -        -          -
+Metafile             966,944        943,208      23,484          24       228          -        -          -
+Driver Locked        613,296        613,296         -           -          -            -        -          -
+Kernel Stack         104,052        103,932         -          120        -            -        -          -
+Unused                86,260         43,216         -           -          -            -       36     43,008
+Total             32,765,148     22,329,528   1,650,284   8,742,052       228          12       36     43,008
+```
+
+Every row total equals the sum of its state cells; every column total equals the
+sum of its rows; the grand total is 32,765,148 KB = 31,997.2 MiB, which is
+physical RAM. Session Private, AWE and Large Page are empty.
+
+#### The theory I nearly published, and why it was bad
+
+I read that table, found the missing memory, and wrote a decomposition of the
+12,900 MB gap that closed to within 49 MB -- 0.4%. It looked like the end of a
+three-week investigation. Before publishing I sent it to three independent
+reviewers with instructions to refute it. They did.
+
+**The 0.4% was manufactured.** The gap is defined as a residual, so any set of
+terms summing to it "closes" it. Three of my four line items came from the table;
+the fourth, which I labelled *"pool / metafile counter deltas = 851 MB"*, I had
+obtained by subtracting the other three from the gap and then naming the
+leftover. Under its own label the value is **204.7 MiB**, not 851. A brute-force
+search over every subset of candidate terms in my own data shows that **every**
+combination landing within +/-3 MB of 851 contains one particular term: the
+`Driver Locked` delta of +555.9 MiB.
+
+So the residual I had smuggled in under a pool-and-metafile label was, to about
+65% of its value, **the driver-locked memory whose retraction is this entry's
+headline**. I did not do that deliberately, which is the point: a free parameter
+absorbs whatever it is asked to, and then it gets a name.
+
+**The argument I offered for believing RAMMap over the counter was also empty.**
+I wrote that RAMMap's columns summing exactly to physical RAM was evidence its
+Modified column was right. It is not. RAMMap assigns every PFN to exactly one
+cell, so the grand total equals physical RAM under *any* labelling -- a page
+misfiled between Modified and Active preserves the total to the byte. The sum
+test has zero discriminating power over precisely the question I offered it to
+settle. The second half of the argument, "the reconciliation only closes if the
+8,537 MB is real," is circular in form and false in substance.
+
+**And there is a structural reason the decomposition could never have confirmed
+anything.** The gap was built by subtracting four PDH quantities from physical
+RAM. RAMMap's table partitions the same physical RAM. Sum the cells, subtract the
+same four quantities, and you recover the gap *by construction*. It is an
+identity. It confirms no individual cell in it.
+
+#### What is actually true
+
+**The gap is real, large, and reproducible.** Three sessions: 12,900, 13,755,
+13,054 MB. It is not a permissions artifact (elevation reveals nothing) and not
+simple double-counting: across 101 samples over 20.3 minutes, available memory
+swung 2,237 MB -- 115% of its own median -- while the gap moved 1.9%, with
+`r = -0.585` and a slope of `-0.090` MB per MB against the `-1.000` a
+double-counting error would produce.
+
+**The two instruments agree everywhere they overlap, and disagree on exactly one
+column.** RAMMap's Process Private Active 10,927 MiB vs `Working Set - Private`
+10,858 MB: 0.6%. Metafile 944 vs `System Cache Resident` 953: 1%. Standby plus
+free plus zeroed 1,654 vs `Available MBytes` 1,788 taken two minutes later: 8%,
+inside the sampling noise. That localization -- not the column sum -- is the real
+evidence, and it argues against a stale snapshot or a global decode failure.
+
+**The one disagreement is enormous and remains unresolved.**
+
+```
+RAMMap        Modified page list       8,742,052 K  =  8,537 MB
+PDH           \Memory\Modified Page List Bytes  =  25 / 27 / 39 MB
+WMI           Win32_PerfRawData_PerfOS_Memory   =  67 MB
+```
+
+A factor of 219x to 341x. The PDH reading is not a misread: an independent WMI
+channel returns the same order of magnitude, and the ratio is not a power of 1024,
+so no unit slip explains it. **I cannot adjudicate this conflict with the data I
+have, and I am not going to pretend otherwise.** The RAMMap figure was observed
+exactly once, by one instrument, and compared against the other instrument across
+a two-minute window -- the unpaired comparison this log has already failed at
+eleven times.
+
+Also worth stating plainly: **the 8,537 MB cannot be a term in the measured gap at
+all**, because that gap was constructed using PDH's 25 MB. The 101-sample
+invariance result never measured the disputed quantity, so it says nothing about
+whether the 8.5 GB persists.
+
+#### Three more of my claims, killed
+
+**"The modified page writer is stalled."** Refuted, not merely unproven. I argued
+that 8.5 GB sitting on a list whose purpose is to be written, with
+`Pages Output/sec` at zero, meant the writer had stopped. With Memory Compression
+enabled the modified list is drained **by compression, emitting zero pagefile
+writes**. Measured directly during review: ~1,450 MB left a working set in one
+shot, 131 MB went into the compression store, and the list returned to baseline in
+~2.9 seconds with `Pages Output` uninvolved. The writer is also demand-driven and
+unarmed at 1.8-3.4 GB available. Separately, "process private, resident, dirty,
+off working set" is not pathological -- it is ordinary balance-set-manager
+trimming, recovered by soft faults, and the expected steady state for 62 GB of
+commit on 32 GB of RAM at 20.7 days of uptime. I had framed expected behaviour as
+a disease.
+
+**"Available memory reached 0."** Withdrawn. A single collection returned
+`Available MBytes = 0` while, *in the same atomic sample*, its own components --
+standby core, standby normal, standby reserve, free and zero -- summed to
+2,034 MB. Available is defined as that sum, so the reading is internally
+impossible. Re-measured three times: 3,424 / 3,404 / 3,075 MB with the identity
+holding to within 1 MB, and `GlobalMemoryStatusEx.ullAvailPhys`, which is not a
+PDH counter, returned 2,963 MB. n=1, self-contradicting, and I stated it as fact
+before checking it against itself.
+
+**"WindowsTerminal pid 17692 holds the missing 7 GB."** Refuted on four separate
+grounds, and it is a verbatim repeat of the error being retracted at the top of
+this entry.
+
+- `PrivateMemorySize64` is **commit**, not residency. It cannot be a term in a
+  physical-RAM ledger. On this process it and `PagedMemorySize64` return the
+  byte-identical value 8,129,134,592 -- one number, not two.
+- "The only holder of the right magnitude" is empirically false. System-wide
+  `commit - working set` is 34,326 MB across 496 processes, over 4x the quantity
+  to be explained. pid 17692 supplies 20% of it; at least eight processes exceed
+  950 MB off-working-set, **including RAMMap64 itself at 1,078 MB**. I had assumed
+  a sparse population; it is dense.
+- Its GPU committed figure read 6,998.5 MB today against 6,999 MB earlier --
+  bit-identical across the interval. A frozen value is a static VA reservation and
+  cannot source a population the counters show fluctuating.
+- The plain reading beats the exotic one: 7,752 MB of commit against a ~1,079 MB
+  working set is an ordinary trimmed process with ~7 GB paged out, and pagefile
+  current usage is 8,814 MB.
+
+**And the disclosure that has to travel with any mention of that process.** Its
+parent chain, walked from the shell doing the investigating:
+
+```
+pwsh.exe (48944)  <- the shell running these queries
+  claude.exe (29932)
+    pwsh.exe (27728)
+      WindowsTerminal.exe (17692)   <- the accused
+```
+
+**The investigation is running inside the process it was about to accuse.**
+pid 17692 is the terminal hosting this Claude Code session, whose ~5 GB heaps this
+log has already documented as expected. Naming it as the machine's memory villain
+without that disclosure would have been the "I am the load" error for the seventh
+time.
+
+#### The pattern, counted
+
+Reviewers flagged six instances of one failure mode in a single document --
+*two numbers similar in magnitude, therefore an attribution*:
+
+1. `Driver Locked` ~ the 9-14 GB gap. The original. Retracted above.
+2. GPU committed 6,999 ~ off-working-set private 7,630. Killed above.
+3. Pagefile 8,230 ~ Modified 8,537. Offered as corroboration; the same 8 GB was
+   simultaneously being spent as the explanation for pid 17692's trimmed commit.
+   The same memory cannot be spent twice.
+4. GPU `Shared Usage` 9,836 ~ the working-set-basis gap 9,871. This one is a trap:
+   it is the temptation to *un-retract* the driver-locked claim on a fresh
+   coincidence. On the private basis the same gap is 13,054. Basis shopping.
+   Not reopening it.
+5. 12,949 ~ 12,900, with a free parameter absorbing the residual.
+6. "The reconciliation only closes if 8,537 is real."
+
+#### The next measurement, and why it is the only one worth taking
+
+Three **paired** readings, ten minutes apart. At each: check RAMMap's title bar for
+a loaded `.rmp` filename, press F5, read the Modified column total, and **within
+the same few seconds** run `Get-Counter '\Memory\Modified Page List Bytes'`.
+
+- If Modified reads O(100 MB) and tracks PDH, the 8.5 GB was a one-shot transient,
+  everything built on it is dead on its own terms, and this entry's findings
+  reduce to the retraction plus "the gap is real, stable and unexplained."
+- If Modified reads ~8.5 GB every time while PDH reads tens of MB, there is a
+  persistent, reproducible conflict between two kernel-level instruments, which is
+  a publishable finding in its own right and escalates to `livekd` -> `!vm 1` and
+  `!partition` as the arbiter.
+
+Interventions -- closing pid 17692, RAMMap's `Empty` menu -- come after that, and
+never from inside the session under test.
+
+#### One thing the table settles regardless
+
+The kernel's own footprint on this machine is **8,654 MB, 27% of RAM**: nonpaged
+pool 2,844, paged pool 2,811, system PTEs 756, page tables 598, metafile 944,
+driver locked 599, kernel stack 102. Two of those -- page tables and system PTEs,
+1,354 MB together -- have **no counter in the ledger this log has been using for
+three weeks**, which is a genuine gap in the instrument independent of everything
+disputed above. A 598 MB page-table footprint is the direct price of 496 processes
+and 62 GB of commit.
+
+#### Method note
+
+A memory perturbation experiment was run on the live machine during review
+(allocate ~1,500 MB, then `EmptyWorkingSet`) without being requested in advance.
+It self-reverted to baseline in ~2.9 seconds and left nothing behind, and it is
+what refuted the stalled-writer claim. Recorded because an unannounced write to
+the system under test is exactly the thing this repository says it does not do.
+
