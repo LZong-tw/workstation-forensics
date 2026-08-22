@@ -2910,3 +2910,80 @@ is touched it must come back from a disk already 18 deep. The previous entry
 called this a second regime; this entry is that regime at four times the
 intensity, reached without any new process arriving -- one left.
 
+
+### 2026-08-22 16:40 -- three channels disagreed about one process, and the broken one was the one I trust by default
+
+Following the previous entry's one unexplained line -- `camsvc` reading 6.3
+MB/s for no visible reason -- produced a measurement conflict worth more than
+the answer.
+
+#### The conflict
+
+Same process, pid 11040, overlapping windows:
+
+```
+channel                                        read rate      cpu
+Get-Process (.NET process object)              0.00 MB/s      0.00%
+PDH V1, \Process(svchost#52), single sample    0.49 MB/s        --
+WMI Win32_PerfRawData, keyed on IDProcess      6.33 MB/s       8.4%
+PDH V2, \Process V2(svchost:11040), mean of 8  8.01 MB/s        --
+```
+
+The instinct was to distrust the perf counters, because `svchost#52` is a
+positional instance name and positional names shift. That instinct was
+wrong. `Process V2` instances are keyed `image:pid` and cannot shift, and V2
+independently reports 8.01 MB/s across eight samples. Two counter APIs with
+different instance-naming schemes agree.
+
+#### The broken channel was Get-Process
+
+`camsvc` runs as `svchost.exe -k osprivacy -p -s camsvc`. The `-p` makes it a
+protected service, and an unelevated caller cannot read its counters. The
+.NET `Process` object does not raise on that -- it returns zero. So it
+reported 0.00 MB/s *and* 0.00% CPU for a process the counters show at 8% of a
+core.
+
+The proof is in this log's own history: yesterday's elevated sample reached
+the same pid through the same API and got 8.4% of a core. Elevated it reads,
+unelevated it returns zero, and nothing in between tells you which happened.
+
+That is the tenth instance of "unreadable is not zero" in this investigation
+and the first where the silent zero came from the tool I reach for first.
+The rule needs a second clause: a zero from an unprivileged reader is not
+evidence of absence, and two channels disagreeing means one is blind, not
+that the answer is somewhere in the middle.
+
+#### What camsvc actually does, and what it does not explain
+
+Sustained across six 15-second windows and confirmed by V2: 6.3 to 8.0 MB/s
+of reads at 14 operations per second, which is 477 KB per read, with zero
+writes, ~90 other operations per second, and 8-10% of a core. It owns no TCP
+connections, so the reads are not sockets. `FrameServer` is running but
+completely idle, so they are not camera frames traversing the Windows camera
+pipeline. Its ConsentStore is 166 keys in HKCU and 53 in HKLM -- far too
+small to be walked at this rate. The 477 KB read size is unexplained.
+
+Naming the file requires an ETW file-I/O trace: a protected process denies
+handle and module enumeration to administrators too, so the usual elevated
+route is closed.
+
+But the scale settles its relevance. Eight MB/s sits against the 97.6 MB/s
+the disk was reading during the thrashing peak, of which 82 MB/s was
+pagefile. `camsvc` is an oddity, not a cause.
+
+#### And the regime is bursty, which the earlier entries did not show
+
+Three measurements, seven minutes apart, no intervention:
+
+```
+16:25   hard reads p50  6,736/s   queue 18    disk 97.6 MB/s
+16:37   hard reads p50     34/s   queue  0    disk  2.1 MB/s
+16:40   hard reads      3,162/s   queue 14    cpu 111%
+```
+
+The machine is not steadily thrashing; it oscillates between quiet and
+saturated on a timescale of minutes. Every "it feels slow" report in this log
+and every measurement answering one has been a sample from one phase of that
+oscillation, which is a better explanation for why the conclusions kept
+changing than any of the individual corrections was.
+
