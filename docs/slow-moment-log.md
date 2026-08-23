@@ -4642,3 +4642,30 @@ compared across a boot, and 518 hours of uptime is still the largest uncontrolle
 variable in the whole investigation. Before that, the D: pagefile entry needs a
 decision, since a reboot is when it would take effect.
 
+
+#### Method note: the D: pagefile was created at 16:48, mid-measurement
+
+The user set `d:\pagefile.sys` to a fixed 32,768 MB. Windows created the file
+immediately -- adding a pagefile does not require a reboot -- and it was already
+carrying load within minutes:
+
+```
+D:\pagefile.sys   32,768 MB   created 2026-08-23 16:48   Current 1,184 MB   Peak 1,201 MB
+Commit Limit     156,230 MB = 31,998 RAM + 91,464 C: + 32,768 D:
+Committed         44,236 MB   28.3 %
+```
+
+The registry entry for D: had existed since before this investigation began but the
+file had never been created, so this is the first boot session in which the machine
+has had two pagefiles. `c:\pagefile.sys` remains system-managed at 91,464 MB; adding
+D: does not shrink it.
+
+This is a deliberate write to the system under test and is recorded as such. It does
+not invalidate the settled ledger above, which was taken at 16:56, eight minutes
+after the file appeared. It does add one confound to the 23:20-versus-16:56
+comparison in the entry above: D: had absorbed 1,184 MB of commit by then, so a small
+part of the Available rise is the new pagefile rather than the logout. Against a
++4,586 MB total that is at most a quarter, and the direction of the remaining
+correction is unknown because commit migration between pagefiles does not map onto
+resident pages one-for-one.
+
