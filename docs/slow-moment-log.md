@@ -4480,3 +4480,165 @@ the wrong quantity and the wrong sequence. Restated:
 Any memory recovered attributes to the **tree** -- five pwsh, five OpenConsole and
 a wsl.exe -- not to WindowsTerminal alone.
 
+
+### 2026-08-23 16:52 -- the 8 GB was session-scoped, and the instrument conflict is still not settled
+
+The logout ran. Session 1 died with it, taking WindowsTerminal pid 17692 and the
+6,419,680 KB Modified block that the last three entries argued about. RamMap was
+reopened elevated in the fresh session and both tabs captured.
+
+#### Use Counts, before and after
+
+```
+                              23:20 (session 1)      16:52 (session 2)
+Modified, all rows            9,335,320 K            1,331,888 K      -85.7%
+  Process Private Modified    8,445,120 K              792,432 K      -90.6%
+Active, all rows             (not recorded)         28,710,856 K
+Driver Locked                   615,260 K              614,816 K       -0.07%
+```
+
+`Driver Locked` is now measured at 598.9 / 600.1 / 599.4 / 600.8 / 600.4 MB across
+five samples, 4.2 hours and a session boundary. **Fifth confirmation of the iGPU
+retraction.** Nothing in this dataset ever had that row above 601 MB.
+
+#### Processes tab: no successor
+
+The old table had one process at 6,269 MB Modified and the next at 351 MB. The new
+one has no such row. Largest Modified holders, session 2:
+
+```
+dwm.exe            49000    112,904 K
+Akiflow.exe        17700     95,648 K
+explorer.exe       46696     83,124 K
+Rize.exe           64200     56,920 K
+chrome.exe         80856     44,672 K
+WindowsTerminal    30764     18,376 K
+```
+
+The replacement terminal, doing the same job, holds **18,376 K -- 0.29% of what its
+predecessor held.** The distribution is not merely smaller, it has no head.
+
+So whatever that block was, it was **session-scoped and accumulated over 501 hours
+of a single logon session.** That is a real property, and it is the first
+statement in this log about the block that does not depend on believing RamMap's
+Modified column.
+
+#### The 200x conflict: not resolved, and now moving the wrong way
+
+A paired read, RamMap snapshot against PDH within the same few minutes:
+
+```
+16:52:32   PDH  Modified Page List Bytes         72 MB
+16:52:34   PDH                                   72 MB
+16:52:35   PDH                                   72 MB
+16:52:37   PDH                                   72 MB
+RamMap     Modified total                     1,301 MB
+```
+
+The ratio has fallen from 207-341x to **18x**. But the two instruments did not fall
+together: RamMap's figure dropped 7x across the logout while PDH's figure **rose**,
+from 25 / 27 / 39 / 44 MB last night to 72 and later 117 MB. One instrument says the
+quantity collapsed; the other says it grew. **The conflict is unexplained, and the
+logout did not adjudicate it.**
+
+One thing did improve. The check named two entries ago as the discriminating test --
+Use Counts `Standby + Zeroed + Free` against `\Memory\Available Bytes` at the same
+instant -- now reads:
+
+```
+RamMap  2,634,432 + 28,388 + 59,472 K = 2,658 MB
+PDH     Available MBytes               2,562 MB    (16:52:32)
+```
+
+**3.7% apart.** The caveat is that RamMap's refresh was a manual F5 whose exact
+timestamp is not recorded, so this is a near-pairing, not a true one. Taken for what
+it is: RamMap's decode of three of the eight page-state columns agrees with the
+kernel. That makes "the whole PFN walk is misdecoded on build 26200" harder to hold,
+and leaves the disagreement localised to the Modified column specifically.
+
+#### The pre-registered test is spoiled, and the honest answer is that it did not run
+
+The registration was:
+
+> - **Available rises ~6.8 GB** -> RamMap's Modified column is measuring real
+>   resident memory.
+> - **Available rises under 1 GB while Committed drops ~7.7 GB** -> the block was
+>   pagefile-backed and the column is an artifact.
+
+Measured across the logout, settled at 44 minutes with paging quiet (24 pages/sec in):
+
+```
+                    23:20 -> 16:56
+Committed        67,947 -> 43,407 MB    -24,540 MB
+Available MBytes  1,048 ->  5,634 MB     +4,586 MB
+```
+
+**Neither branch.** And the reason is a design fault in the test, not an ambiguous
+result: the intervention that actually happened was a full logout, which destroyed
+several hundred processes, not the single tree the dichotomy was written for. The
++4,586 MB and the -24,540 MB are both dominated by processes that have nothing to do
+with pid 17692. The registered discriminator required an isolated intervention, and
+pid 17692 no longer exists to run it against.
+
+Recording this as a failed experiment rather than a weak result. The design error --
+registering a two-branch test against a delta that a confound could produce either
+way -- is the same class as the goalpost move in the entry before it, and is worth
+more than the answer would have been.
+
+#### Settled pre-reboot ledger
+
+Old kernel, 518.94 hours uptime, fresh session, paging quiet. This state is
+unrepeatable once the machine reboots.
+
+```
+uptime                        518.94 h   (boot 2026-08-02 02:00:21)
+processes                          449
+available mbytes                 5,634 MB
+committed bytes                 43,407 MB
+modified page list bytes           117 MB
+pool nonpaged bytes              2,102 MB
+pool paged resident bytes        2,428 MB
+system driver resident bytes        45 MB
+system cache resident bytes        535 MB
+system code resident bytes          12 MB
+pages input/sec                   24.4
+pages output/sec                     0
+working set (all processes)     23,628 MB
+working set - private           14,717 MB
+```
+
+Against last night: committed down 36%, available up 5.4x. The machine is not under
+memory pressure right now, for the first time in this log.
+
+Two kernel rows still have **no PDH counter at all** -- Page Table 596,676 K and
+System PTE 724,300 K, 1,290 MB between them. That instrument gap is independent of
+every dispute in this investigation and survives the logout unchanged.
+
+#### dwm, unchanged from the previous entry
+
+```
+pid 49000   started 2026-08-23 16:12:02   up 0.74 h   WS 213 MB   private 351 MB   handles 1,534
+```
+
+`ms_per_pass` 2.000 at first sample against 7.919 for the old dwm, and inside the
+historical fresh-dwm population at the value expected for its age. The confound
+recorded last entry stands: window count fell 498 -> 185 across the logout and no
+window-count-matched comparison is possible.
+
+#### One unpaired anomaly, logged not resolved
+
+RamMap reports chrome pid 36692 at 3,971,636 K = 3,878 MB **resident private**, while
+`PrivateMemorySize64` for the same pid reads 3,173 MB **commit** at 16:56. Resident
+private cannot exceed committed private. The two readings are minutes apart and
+chrome was shrinking, so this is most likely a pairing artifact rather than a
+violation -- but it is the same shape of claim this log has been burned on, so it is
+recorded as an open item rather than used for anything.
+
+#### Next
+
+Reboot, then re-measure. What logout has already been shown *not* to reset: nothing
+yet -- the kernel pools, page tables, System PTE and metafile cache have not been
+compared across a boot, and 518 hours of uptime is still the largest uncontrolled
+variable in the whole investigation. Before that, the D: pagefile entry needs a
+decision, since a reboot is when it would take effect.
+
