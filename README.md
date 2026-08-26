@@ -355,6 +355,68 @@ Findings are logged in
 
 ---
 
+## Part 5 — Kernel pool sampler
+
+```
+watch/
+  kernel-pool-log.ps1         one sample per firing, appended to kernel-pool.csv
+  kernel-pool-setup-task.ps1  registers it every 30 min + at logon (no elevation)
+```
+
+Answers one question and no others: **do the kernel pools grow with uptime?**
+
+On 2026-08-26 this machine rebooted after 519.04 hours. Paged Pool and Nonpaged
+Pool fell 2,834.7 MB between them -- 99.2% of the total kernel reduction, and
+PDH independently reported 2,526 MB across the same two counters. It is the
+first substantial result in this investigation that two instruments agree on.
+
+It is also confounded. KB5120708 and KB5121003 installed at 09:00 the same
+morning, so the kernel binaries changed between the two readings, and one
+sample per boot cannot separate 519 hours of uptime from a cumulative update.
+
+**The test is pre-registered, in the script header, before the data exists:**
+
+```
+baseline, 0.71 h on build 26200.9168     old kernel, 519.04 h
+  Pool Nonpaged Bytes     1,247 MB         2,126 MB
+  Pool Paged Resident       819 MB         2,466 MB
+```
+
+Climbs back toward 2,126 / 2,466 as uptime accumulates -> uptime is the
+mechanism, and per-tag attribution (poolmon, elevated) becomes worth doing.
+Sits flat near 1,247 / 819 at *comparable* uptime -> the drop belonged to the
+update and uptime was never the cause. The old figures are from 519 hours; a
+flat reading at 50 hours decides nothing, which is why `os_up_h` is on every
+row.
+
+`os_build` is on every row too, for the same reason the test exists at all: a
+kernel update landed unnoticed between two readings once already, and the
+confound has to be visible in the series rather than reconstructed from the
+Setup log afterwards.
+
+Two columns were dropped before this shipped. `Pool Nonpaged Allocs` and `Pool
+Paged Allocs` would have separated a leak of many small allocations from a few
+large ones, but both read exactly 0 through three channels -- PDH cooked, PDH
+raw, and `Win32_PerfRawData_PerfOS_Memory` -- so this kernel does not maintain
+them. A constant column carries no information, and this repo has been burned
+once already by reading meaning into one (`p50_ms`, pinned at the 144 Hz frame
+interval in all 1,118 rows of `dwm-growth.csv`).
+
+The standby breakdown replaced them and earns its place differently:
+`stby_core + stby_norm + stby_res + freezero` must equal `avail_mb`, so every
+row self-checks, and those four are exactly what RamMap's Use Counts tab reports
+as Standby + Zeroed + Free. The one discriminating check this investigation has
+for RamMap's page-state decode needs both numbers from the same instant; every
+attempt at it so far has been unpaired against a figure drifting hundreds of MB
+between consecutive seconds.
+
+Failed queries are written as `na`, never `0`.
+
+Findings are logged in
+[`docs/slow-moment-log.md`](docs/slow-moment-log.md).
+
+---
+
 ## Notes
 
 Everything here is read-only with respect to system state. Nothing changes dump
