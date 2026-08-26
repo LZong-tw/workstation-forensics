@@ -64,13 +64,18 @@ Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction Silent
 $action = New-ScheduledTaskAction -Execute $wscript -Argument $arg
 
 # Two triggers: one at logon for the fresh-kernel baseline, one repeating
-# indefinitely. RepetitionDuration of [TimeSpan]::Zero on a -Once trigger means
-# repeat forever; a finite duration would stop the series after that window
-# without any indication in the CSV.
+# indefinitely.
+#
+# No -RepetitionDuration. Omitting it is what means indefinite, and the two
+# obvious ways to say so explicitly both fail: [TimeSpan]::Zero is rejected as
+# "(12,26):Duration:PT0S ... incorrectly formatted or out of range", and
+# [TimeSpan]::MaxValue as "P99999999DT23H59M59S is out of range". The same
+# gotcha is recorded in dwm-setup-elevated-task.ps1; it is repeated here because
+# the failure surfaces at Register-ScheduledTask, far from the trigger that
+# caused it.
 $tLogon = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
 $tRepeat = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) `
-    -RepetitionInterval (New-TimeSpan -Minutes $IntervalMinutes) `
-    -RepetitionDuration ([TimeSpan]::Zero)
+    -RepetitionInterval (New-TimeSpan -Minutes $IntervalMinutes)
 
 # DontStopIfGoingOnBatteries: uptime accumulates on battery too, and excluding
 # unplugged hours would bias the very series being tested against uptime.
