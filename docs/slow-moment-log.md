@@ -4669,3 +4669,192 @@ part of the Available rise is the new pagefile rather than the logout. Against a
 correction is unknown because commit migration between pagefiles does not map onto
 resident pages one-for-one.
 
+
+### 2026-08-26 09:47 -- the reboot, and the first finding two instruments agree on
+
+The machine rebooted at 09:05:47 after 519.04 hours of uptime. RamMap was reopened
+elevated and Use Counts captured at ~09:47 with PDH counters read within seconds.
+
+#### The confound, stated before the result
+
+There were **four reboots this morning**, at 08:39, 08:58, 08:59 and 09:04. Three of
+the four were initiated by `TrustedInstaller.exe` on behalf of `NT AUTHORITY\SYSTEM`.
+The Setup log shows why:
+
+```
+08-26 08:40  id 4  A reboot is necessary before package KB5120708 can be installed
+08-26 09:00  id 2  Package KB5120708 successfully changed to the Installed state
+08-26 09:00  id 2  Package KB5121003 successfully changed to the Installed state
+os build: 26200.9168
+```
+
+**The kernel binaries changed between the two measurements.** Everything below is
+therefore a comparison across *two* interventions -- 519 hours of uptime discarded,
+and a cumulative update installed -- and this log cannot separate them. That is a real
+limitation and no amount of instrument agreement fixes it.
+
+#### The kernel rows, old against new
+
+RamMap Use Counts, same tab, same tool, both elevated:
+
+```
+                 519.04 h (K)     0.71 h (K)      change MB        %
+Page Table          596,676         518,272          -76.6      -13.1
+Paged Pool        2,698,272         870,852       -1,784.6      -67.7
+Nonpaged Pool     2,656,836       1,581,564       -1,050.1      -40.5
+System PTE          724,300         706,968          -16.9       -2.4
+Metafile            725,512       1,049,332         +316.2      +44.6
+Driver Locked       614,816         619,908           +5.0       +0.8
+Kernel Stack        176,856         244,584          +66.1      +38.3
+----------------------------------------------------------------------
+sum               8,193,268       5,591,480       -2,540.8      -31.8
+sum ex-Metafile   7,467,756       4,542,148       -2,857.0      -39.2
+```
+
+**Paged Pool and Nonpaged Pool account for 2,834.7 MB of the 2,857.0 MB, or 99.2%.**
+The reduction is not spread across the kernel; it is those two rows.
+
+The independent channel agrees:
+
+```
+PDH                          519.04 h     0.71 h     change
+Pool Nonpaged Bytes           2,126 MB    1,247 MB    -879 MB
+Pool Paged Resident Bytes     2,466 MB      819 MB  -1,647 MB
+                                                    -2,526 MB
+```
+
+RamMap puts the size of the drop 12.2% higher than PDH does (2,834.7 against
+2,526 MB), and the same directional bias is present in the levels: RamMap reads 22.1%
+above PDH on nonpaged at 519 h and 23.8% above it at 0.71 h, and 6.9% then 3.8% above
+on paged. **Two instruments, consistent bias, same sign, same order of magnitude.** This is the first substantial claim in this entire
+investigation that survives on more than one instrument.
+
+Three post-reboot PDH samples confirm it is not a boot transient: nonpaged
+1,241 / 1,259 / 1,254 / 1,247 MB and paged resident 887 / 850 / 797 / 819 MB across
+40 minutes.
+
+#### Retracted before it was ever asserted: Page Table and System PTE
+
+The previous entry flagged Page Table and System PTE as "a genuine instrument gap
+independent of every dispute" and implied they were candidate accumulators, since no
+PDH counter reports them. The gap is real -- there is still no counter for either --
+but the accumulation hypothesis is dead:
+
+```
+Page Table    596,676 -> 518,272 K    -76.6 MB   -13.1%
+System PTE    724,300 -> 706,968 K    -16.9 MB    -2.4%
+```
+
+**System PTE moved 2.4% across 519 hours of uptime and a kernel update.** These are
+constants of this machine at roughly 500 and 700 MB, not something that grows. The
+1,290 MB they hold is a permanent cost, correctly invisible to the ledger, and not a
+leak. Looking at them because they were unmeasured was the same reflex that produced
+the dwm attribution two entries ago.
+
+#### Driver Locked, sixth sample
+
+```
+613,296 / 614,492 / 613,748 / 615,260 / 614,816 / 619,908 K
+  598.92   600.09    599.36    600.84    600.41    605.38  MB
+```
+
+Across 4.2 hours, a logout, a reboot, and a cumulative update, the row has never left
+the 599-606 MB band. The iGPU attribution has now been falsified against every
+intervention available on this machine.
+
+#### Kernel Stack and Metafile grew, and both are explained
+
+Kernel Stack is up 66.1 MB, and thread count is up from 7,057 to 8,280-9,005 over the
+same comparison. Stacks scale with threads; this is arithmetic, not a finding.
+
+Metafile is up 316.2 MB, but **718,812 K of the new 1,049,332 K is on the Standby
+list** -- 68.5% is reclaimable cache, not committed kernel memory. The machine has
+been reading a lot of files since boot.
+
+#### dwm after the reboot
+
+The sampler task survived and captured the new dwm:
+
+```
+time              pid   up_h  pass_per_s  ms_per_pass  windows  crd
+09:08:19          960   0.04       144.1        0.137   252/15    0
+09:10:31          960   0.08       144.0        0.570   268/17    0
+09:40:39          960   0.58       144.1        1.421   427/38    1
+```
+
+`pass_per_s` is pinned at the 144 Hz panel rate in all three samples. The symptom
+this log has chased for three weeks -- 130.9 passes/s against a 144 Hz panel, and
+50.6 at its worst -- is absent.
+
+`ms_per_pass` at 0.58 h is 1.421, against a historical fresh-dwm population of 0.408
+to 2.000. It sits inside that range. **The 09:40 sample has `crd_capturing = 1`**, a
+confound this log has recorded before, so it should not be read as a trend.
+
+#### The instrument conflicts, one improved and one not adjudicated
+
+```
+                                RamMap        PDH        ratio
+Modified total                 1,077 MB      30 MB         36x
+Standby + Zeroed + Free        3,040 MB   1,736-1,844 MB   1.7x
+```
+
+The Modified conflict persists: 207-341x, then 18x after the logout, now 36x.
+
+The `Standby + Zeroed + Free` versus `Available MBytes` check -- the discriminator
+named three entries ago -- **cannot be evaluated from this capture and is not being
+scored.** RamMap's refresh was a manual F5 at an unrecorded moment, and Available
+moved from 2,063 to 1,736 to 1,844 to 1,818 MB across four minutes while the machine
+was still loading. A 1,200 MB apparent discrepancy against a quantity drifting 300 MB
+between consecutive seconds is not evidence of anything. It agreed to 3.7% on 08-23
+under quiet conditions; that reading stands and this one is void.
+
+#### Why the D: pagefile did not survive the reboot: D: is BitLocker-encrypted
+
+The user set `d:\pagefile.sys` to a fixed 32,768 MB on 08-23 and Windows created the
+file immediately. After the reboot the registry entry is unchanged, `ExistingPageFiles`
+still lists it, and **the file is gone** -- D: free space is back to 100 GB from 68 GB,
+and `Win32_PageFileUsage` reports only C:.
+
+The BitLocker Management log names the cause:
+
+```
+2026-03-26 18:51:54  id 796  BitLocker is using software-based encryption to protect volume D:
+2026-03-31 19:07:34  id 774  BitLocker was resumed for volume D:
+2026-08-23 16:46:41  id 900  committed metadata changes for volume D:
+2026-08-23 16:46:46  id 897  recovery information for volume D: backed up to Microsoft account
+```
+
+208 events in the log, 103 naming C: and 18 naming D:. The BitLocker metadata change
+on D: is at **16:46**, two minutes before the pagefile file appeared at **16:48**.
+
+At boot, pagefile initialisation runs before BitLocker unlocks non-boot data volumes.
+A locked volume cannot host a paging file, so the entry is skipped. This also explains
+the state that existed before this investigation began: the D: entry has been in the
+registry a long time and the file had never been created at any boot. It appeared on
+08-23 only because the setting was applied inside an already-unlocked running system.
+
+`HKLM:\SYSTEM\CurrentControlSet\Control\FVEAutoUnlock` exists with no subkeys and no
+values, which is consistent with no auto-unlock key being stored for D:. **That key was
+read unelevated and may be ACL-masked, so it is corroboration, not proof.**
+`manage-bde -status D:` returns access denied without elevation and has not been run.
+
+Incidental: system-managed `c:\pagefile.sys` was resized from 91,464 MB to 47,104 MB
+at 09:05, dropping Commit Limit from 156,230 MB to 79,101 MB. Peak usage on the old
+kernel was 63,322 MB, so the new limit leaves roughly 11 GB of headroom above the
+highest commit this machine has been observed to reach.
+
+#### Not settled, and the next measurement
+
+At 0.71 h uptime the machine has 495 processes, 39,489 MB committed and **1,736 MB
+available**, with private working sets still climbing (17,824 -> 19,153 -> 20,291 MB).
+It is not at rest and none of the process-level numbers here should be compared
+against the old kernel.
+
+The measurement that matters now is **the same kernel-pool pair sampled repeatedly
+over the coming days**. If Paged Pool and Nonpaged Pool climb back toward 2,466 and
+2,126 MB as uptime accumulates, the uptime arm of the confound is confirmed and the
+mechanism is a pool leak worth naming. If they sit flat near 819 and 1,247 MB, the
+reduction belonged to KB5120708/KB5121003 and 519 hours of uptime was never the cause.
+Both branches are decidable by waiting, which makes this the first pre-registered test
+in this log that does not depend on an intervention that destroys its own baseline.
+
