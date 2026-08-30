@@ -16,6 +16,7 @@ dwm-capture/
 *.csv
 
 # Local instrument state
+watch/pool-capture/
 dwm-growth.csv
 dwm-growth-trigger.log
 ui-response.csv
