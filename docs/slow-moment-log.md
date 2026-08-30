@@ -5005,3 +5005,123 @@ against `C:\Windows\System32\pooltag.txt` and the loaded driver list, and stop.
 The sampler keeps running through it, because the tag snapshot is one moment and the
 growth curve is the thing that made it worth taking.
 
+
+### 2026-08-31 03:08 -- a tag name, an instrument that cost 13 GB, and a magnitude match to be suspicious of
+
+The previous entry closed the pool sampler's question and named the next step:
+which pool tag holds the 2,253 MB. Two attempts were made. The first was a
+mistake worth more than the answer.
+
+#### The instrument that damaged the system it was measuring
+
+`pool-tags.ps1` as first shipped used `wpr -start Pool -filemode`, on the
+reasoning that the WDK was absent and `wpr.exe` has a built-in Pool profile. Run
+elevated for 60 seconds it produced:
+
+```
+13,228 MB ETL written to C:
+192,160,703 events dropped -- "Please record this trace again"
+available memory afterwards      712 MB
+hard page reads afterwards    26,769 /sec
+```
+
+**The capture was unusable and the machine was measurably worse for it.** An
+instrument that degrades the system under test by more than the effect it is
+measuring is not an instrument.
+
+It was also the wrong question. The Pool profile records alloc and free *events*
+-- churn during a window -- when what was needed is what is *standing right now*.
+That distinction was written into the script's own header, and the script still
+went and measured the other thing.
+
+And the elevation it demanded was never necessary, which the replacement proves.
+
+#### The instrument that should have been used first
+
+`NtQuerySystemInformation(SystemPoolTagInformation = 0x16)` returns standing
+bytes and allocation counts for every tag. It is what poolmon reads. On this
+machine, from a **Medium-integrity shell with no elevation**, it returns
+`STATUS_SUCCESS` and 4,356 tags. One call, no trace, nothing written to disk,
+about 4 seconds including PowerShell startup.
+
+Two properties of the data, both checked before using it:
+
+**Allocations are not bytes.** `SeAt` shows 617,123,657 allocations holding
+89.8 MB; `ismc` shows 3 allocations holding 321.1 MB. Sorting by allocation count
+finds churn and would have named the wrong tag.
+
+**The tags do not sum to the counters, and that is expected.** Summed tags read
+3,579 MB paged against PDH's 4,251, and 2,015 against 2,296 nonpaged -- 84% and
+88%. Untagged and large-page allocations are not in this table. Both sums are
+written on every CSV row so the shortfall cannot later be mistaken for a decode
+error, the way the RamMap Modified column was.
+
+#### What one snapshot shows, at 114.00 h uptime
+
+```
+tag     paged MB   nonpaged MB          tag    paged MB   nonpaged MB
+Vi54     1,834.5         0.0            ConT        0.0        132.3
+Toke       409.1         0.0            smNp        0.0        128.9
+ismc         0.0       321.1            HalD        0.0        124.4
+Vi55       183.1         0.0            Vi12      114.7          0.0
+MmSt       169.8         0.0            smCB        0.0        108.4
+```
+
+**Nineteen `Vi*` tags hold 2,536 MB between them** -- 2,360 paged and 176
+nonpaged -- against a total pool of 6,550 MB. `Vi54` alone is 1,834.5 MB, 43% of
+all paged pool and 10 times the next paged holder.
+
+`Vi` belongs to `Vid.sys`, whose file description is **"Microsoft Hyper-V
+Virtualization Infrastructure Driver"**. It is loaded and running, alongside
+`hvservice`, `vmbusr`, `vhdmp` and `vhdparser`. Virtualization-based security is
+on (`VirtualizationBasedSecurityStatus = 2`, security services 2,3,4,5, code
+integrity enforcement 2), and WSL2 is running with `vmmemWSL` at 7,000 MB of
+private commit.
+
+#### Why this is not yet the answer, stated plainly
+
+The growth to be explained is **2,253 MB**. The `Vi*` tags hold **2,536 MB**.
+Those two numbers are 12.6% apart, and that resemblance is worth nothing.
+
+This log has been caught on exactly this pattern at least six times -- the
+driver-locked prediction, the 3.2% GPU match, the 6,998,384 K / 6,999 MB digit
+coincidence, the 0.4% reconciliation. A magnitude match between a residual and a
+candidate is not evidence, and a residual is not allowed to be named after
+whatever happens to be the same size.
+
+**What is actually known is smaller and duller: at one instant, one driver's tags
+hold the largest single block of paged pool on this machine.** Whether that block
+was 1,834 MB at boot too -- in which case it is a constant, not the leak -- is
+completely unaddressed by a single sample. `Vi54` being the biggest holder does
+not make it the grower. That is the same error as "dwm was identified because dwm
+was looked at", and it was retracted five entries ago.
+
+#### The test, and it is now cheap
+
+`pool-tags.ps1` appends rather than prints, keeps the top 200 tags by bytes held,
+and stamps `os_up_h` on every row. It is registered as `Pool Tag Sampler` on the
+same 30-minute-plus-logon schedule as the pool sampler, unelevated, at about
+20 KB per sample.
+
+**The answer is the tag whose standing total rises between samples separated by
+hours.** If `Vi54` climbs while paged pool climbs, the attribution is earned. If
+`Vi54` is flat and something in the mid-tail is moving, the biggest holder was
+never the story -- which is why the cut is 200 tags (98.31% of held bytes) and
+not the 40 that would already cover 88.16%.
+
+A confound is already visible and needs recording before it can be discovered
+later and treated as a finding: `vmmemWSL` was at 1,853 MB of private commit at
+02:12 and 7,000 MB at 03:08, on the same boot. If VID's pool tracks guest
+physical pages, `Vi54` will move with WSL2 usage, and any "growth with uptime"
+read off a window containing that jump is really growth with *what the user did
+in WSL*. Uptime and workload have to be separated here, and one series of
+`Vi54` against `os_up_h` alone will not do it.
+
+#### Cleanup owed
+
+`watch/pool-capture/20260831-023749/` holds the 13.2 GB unusable ETL plus about
+50 MB of NGEN PDBs. It is gitignored and has no evidentiary value -- the trace
+dropped 192 million events and answers a question that was the wrong one anyway.
+It is left in place pending a decision rather than deleted unilaterally, per this
+repo's rule about removing captured output.
+
