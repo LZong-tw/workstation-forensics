@@ -4858,3 +4858,150 @@ reduction belonged to KB5120708/KB5121003 and 519 hours of uptime was never the 
 Both branches are decidable by waiting, which makes this the first pre-registered test
 in this log that does not depend on an intervention that destroys its own baseline.
 
+
+### 2026-08-31 02:13 -- the pre-registered test returns, and it says uptime
+
+The kernel pool sampler has run since 2026-08-26 10:13. 225 rows, one boot, one
+build, zero `na` cells. The test registered five days ago in `kernel-pool-log.ps1`
+and in the README, before any data existed, can now be scored.
+
+#### The registration, and the answer
+
+```
+                       baseline 0.71 h    old kernel 519.04 h    now 113.10 h
+Pool Nonpaged Bytes         1,247 MB           2,126 MB            2,263 MB
+Pool Paged Resident           819 MB           2,466 MB            2,056 MB
+Pool Paged Bytes            1,006 MB           4,697 MB            4,315 MB
+```
+
+**Nonpaged pool has already passed the 519-hour figure at 113 hours.** Paged pool
+is at 92% of it, paged resident at 83%. The registered branch was "climbs back
+toward 2,126 / 2,466 as uptime accumulates -> uptime is the mechanism"; it did
+that, and on nonpaged it overshot, in under a quarter of the time.
+
+The confound that spoiled the last comparison is absent here. Every one of the 225
+rows reads `os_build 26200.9168` and `boot 2026-08-26 09:05:47`. No update landed
+mid-series, and there is no second intervention to share the credit with.
+
+#### The shape, binned by uptime rather than fitted
+
+```
+bin        n    np med   ppBytes med   ppResident med   avail med
+  0- 12 h  23   1,585      1,395           1,122          5,954
+ 12- 24 h  24   1,623      1,573           1,092          6,460
+ 24- 36 h  24   1,703      1,752           1,175          5,660
+ 36- 48 h  24   1,922      2,094           1,204          4,167
+ 48- 60 h  24   1,985      2,588           1,391          4,322
+ 60- 72 h  24   1,980      3,013           1,578          3,018
+ 72- 84 h  24   2,075      3,232           1,510          3,783
+ 84- 96 h  24   2,028      3,511           1,644          3,491
+ 96-108 h  24   2,177      3,770           1,618          3,031
+108-120 h  10   2,310      4,146           1,632          3,320
+```
+
+**Paged Pool Bytes is monotone across all ten bins** -- 1,395 to 4,146 MB, a factor
+of 3.0, with no reversal at any step. Nonpaged reverses twice (60-72 and 84-96) and
+is the noisier of the two; 115 of its 224 step-to-step differences are negative and
+its largest single drop is 430 MB. It rises anyway, and the binned medians make
+that visible without a fit hiding the noise.
+
+**No slope is quoted for a reason.** A least-squares line over all 225 rows gives
+5.872 MB/h and extrapolates to 4,635 MB at 519 hours, which would be a prediction
+about a machine state this series never observed. Fitting only the last 24 hours
+gives 16.573 MB/h and an intercept of 465 MB -- an artifact of a 24-hour x-range
+against a quantity that swings 400 MB between adjacent samples. Neither number is
+reported as a rate. The claim is the ordering of the bins, which needs no model.
+
+Note also what did *not* happen: `avail med` falls 5,954 -> 3,320 MB across the same
+bins. The pools do not track available memory; they track time. That is the same
+invariance signature this log recorded for the dwm compositor pass, and it is the
+property that distinguishes accumulation from load.
+
+#### What this does and does not establish
+
+**Established:** the kernel's resident pool footprint on this machine grows with
+uptime, reproducibly, on a single kernel build, and reaches at 113 hours what it
+previously took 519 hours to reach. Resident kernel pool is now
+`np 2,263 + pp_resident 2,056 = 4,319 MB` against `1,247 + 819 = 2,066 MB` at
+0.71 h. **+2,253 MB of physical RAM, held by the kernel, that was not held at boot.**
+
+**Not established:** that this is why the machine feels slow. Nothing here attributes
+the growth to a driver, a pool tag, or a subsystem, and per-tag attribution needs
+`poolmon` or a kernel debugger and elevation -- deliberately out of scope for the
+sampler, and now worth doing as a separate step. A residual of 2,253 MB is a
+measured quantity with a correct label; it is not yet a mechanism, and this log has
+a standing rule against naming one.
+
+#### The machine while the user reported it slow, 02:12
+
+Ten samples at ~3.5 s spacing, taken because the user said "it is getting slow":
+
+```
+time      pgIn/s   avail MB   commit MB   cpu %
+02:12:26   8,061     1,974      61,853     37.5
+02:12:30  13,330     1,843      61,905     31.6
+02:12:34  13,600     1,543      62,112     47.3
+02:12:38   6,329     1,274      62,320     63.1
+02:12:43  13,268       504      63,564     87.5
+02:12:47  28,690       880      62,972     74.2
+02:12:51  46,921       613      63,264     68.6
+02:12:55   2,802       862      63,361     51.5
+02:12:59  13,799     1,607      62,628     81.3
+02:13:03  11,852       951      63,527     59.9
+```
+
+Available memory bottoms at **504 MB** and hard page reads peak at **46,921/sec**.
+This is sustained thrashing across the whole window, not a spike: the minimum
+`pgIn/s` over ten consecutive samples is 2,802. Commit is 62-63 GB against an
+81,687 MB limit, and `C:\pagefile.sys` has grown itself from 47,104 to 49,689 MB
+with 7,996 MB in use.
+
+Disk is not the constraint -- `PhysicalDisk(_Total)` is 98.2% idle at 0.39 ms per
+read -- and neither is clock throttling, with `% Processor Performance` at 98.8.
+The processor queue is 0. **The machine is short of RAM, and the cost is being paid
+in hard faults.**
+
+Top private commit at that moment, which is where the other side of the pressure
+sits and which has nothing to do with the kernel:
+
+```
+node             37128   2,941 MB      chrome     23568   1,872 MB
+WindowsTerminal  10288   2,107 MB      vmmemWSL   11252   1,853 MB
+node             29924   2,004 MB      Rize       29764   1,594 MB
+```
+
+**Two independent contributions, and this entry does not rank them.** The kernel
+has taken 2,253 MB it did not hold at boot; user processes are holding roughly
+16 GB of commit in the top ten alone. Both are real, the sum exceeds what the
+machine has, and no measurement here separates their contributions to the symptom.
+
+#### dwm has degraded again, on the same schedule
+
+```
+              dwm_up_h   pass_per_s   ms_per_pass   handles   private   windows
+fresh             0.04        144.1         0.137     1,385      198       252
+now             113.09        124.9         4.965     2,543    1,192       558
+old dwm 67732   286.18        130.9         7.919     2,567    1,445       498
+```
+
+`ms_per_pass` is 36x its fresh value and `pass_per_s` has left the 144 Hz panel
+rate. The entry on 2026-08-26 recorded "the symptom is absent" at 0.58 h; it is
+back at 113 h, on a fresh dwm, on a fresh kernel, after an update. **The repair by
+reboot is confirmed to be temporary.**
+
+Handles at 113 h (2,543) have nearly reached what the previous dwm held at 286 h
+(2,567). Read that with the confound this log has attached to it twice already:
+window count is 558 now against 498 then, and no window-count-matched comparison
+exists. It is not evidence that degradation is faster this cycle.
+
+#### The next step is now an elevated one, and it is narrow
+
+The sampler has done its job and the question it was built for is closed. What it
+cannot answer -- which pool tag holds the 2,253 MB -- is exactly what `poolmon.exe`
+answers directly, and it needs elevation. That is a deliberate, single, scoped
+escalation rather than a general loosening: read pool tags, match the top growers
+against `C:\Windows\System32\pooltag.txt` and the loaded driver list, and stop.
+
+The sampler keeps running through it, because the tag snapshot is one moment and the
+growth curve is the thing that made it worth taking.
+
