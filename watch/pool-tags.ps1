@@ -150,8 +150,22 @@ function P { param([string]$n, [switch]$Raw)
     if (-not $pdh.ContainsKey($n)) { return 'na' }
     if ($Raw) { [math]::Round($pdh[$n]) } else { [math]::Round($pdh[$n] / 1MB) } }
 
+# vmmem_mb is the discriminator, not decoration. The largest tag here is Vi54,
+# owned by Vid.sys -- the Hyper-V Virtualization Infrastructure Driver -- and if
+# VID's pool tracks guest physical pages then Vi54 moves with what the user does
+# inside WSL, not with uptime. vmmemWSL was observed going 1,853 -> 7,008 MB of
+# private commit inside one hour on 2026-08-31. Without this column, a Vi54 series
+# plotted against os_up_h alone would confound the two and would look like a leak
+# either way. 'na' when no vmmem process exists, which is not the same as 0.
+$vmmem = 'na'
+try {
+    $vm = Get-Process -Name 'vmmem', 'vmmemWSL' -ErrorAction SilentlyContinue
+    if ($vm) { $vmmem = [math]::Round((($vm | Measure-Object PrivateMemorySize64 -Sum).Sum) / 1MB) }
+    else { $vmmem = 0 }
+} catch { $vmmem = 'na' }
+
 $time = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss', $inv)
-$hdr = 'time,os_up_h,os_build,tag,tag_hex,paged_kb,np_kb,paged_allocs,np_allocs,sum_paged_mb,sum_np_mb,pdh_paged_mb,pdh_np_mb,pdh_paged_resident_mb,avail_mb'
+$hdr = 'time,os_up_h,os_build,tag,tag_hex,paged_kb,np_kb,paged_allocs,np_allocs,sum_paged_mb,sum_np_mb,pdh_paged_mb,pdh_np_mb,pdh_paged_resident_mb,avail_mb,vmmem_mb'
 
 # Only tags holding something are written. A 4,356-row snapshot every 30 minutes
 # would be 6 MB/day of mostly zeros; the ones holding nothing carry no
@@ -172,13 +186,13 @@ if (-not (Test-Path -LiteralPath $csv)) {
 }
 
 $lines = $keep | ForEach-Object {
-    '{0},{1},{2},{3},{4},{5},{6},{7},{8},{9},{10},{11},{12},{13},{14}' -f `
+    '{0},{1},{2},{3},{4},{5},{6},{7},{8},{9},{10},{11},{12},{13},{14},{15}' -f `
         $time, $upH, $build, $_.Tag, $_.TagHex,
         [math]::Round($_.PagedUsed / 1KB), [math]::Round($_.NpUsed / 1KB),
         $_.PagedAllocs, $_.NpAllocs,
         [math]::Round($sumPaged / 1MB), [math]::Round($sumNp / 1MB),
         (P 'pool paged bytes'), (P 'pool nonpaged bytes'),
-        (P 'pool paged resident bytes'), (P 'available mbytes' -Raw)
+        (P 'pool paged resident bytes'), (P 'available mbytes' -Raw), $vmmem
 }
 Add-Content -LiteralPath $csv -Value $lines -Encoding ASCII
 
