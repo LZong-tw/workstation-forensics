@@ -5125,3 +5125,99 @@ dropped 192 million events and answers a question that was the wrong one anyway.
 It is left in place pending a decision rather than deleted unilaterally, per this
 repo's rule about removing captured output.
 
+
+## 2026-08-31 03:41 -- Vi54 is not a leak. It fell 374 MB in 26 minutes while I watched.
+
+Four hours ago I wrote that `Vi54` -- the pool tag belonging to `Vid.sys`, the
+Hyper-V virtualization infrastructure driver -- "is a grower, and that is
+arithmetic, not inference." The arithmetic was correct and the word was wrong.
+
+The arithmetic, restated, still holds. At 1.13 h of uptime the paged pool
+**in total, summed across all 3,170 held tags**, was 1,006 MB. `Vi54` alone was
+2,154.1 MB at 114.16 h. A part cannot exceed its whole, so `Vi54` was at most
+1,006 MB then and has risen by at least 1,090 MB since. That is a lower bound on
+a difference between two instants. It says nothing about the path between them,
+and I wrote as though it did.
+
+The path, sampled every ~2 minutes for 26 minutes:
+
+| time     | uptime  | Vi54 paged | step   | vmmemWSL private | avail |
+|----------|---------|-----------:|-------:|-----------------:|------:|
+| 03:15:08 | 114.16h |  2,154.1MB |    --  |         7,014 MB |   651 |
+| 03:15:39 | 114.16h |  2,151.2MB |   -2.9 |         7,015 MB | 1,024 |
+| 03:16:25 | 114.18h |  2,151.3MB |   +0.1 |         7,012 MB |    48 |
+| 03:17:22 | 114.19h |  2,151.0MB |   -0.3 |         7,012 MB | 1,629 |
+| 03:18:13 | 114.21h |  2,096.4MB |  -54.6 |         7,012 MB |   495 |
+| 03:20:24 | 114.24h |  1,925.5MB | -170.9 |         7,011 MB |   684 |
+| 03:22:28 | 114.28h |  1,924.3MB |   -1.2 |         7,014 MB | 2,890 |
+| 03:24:32 | 114.31h |  1,778.9MB | -145.4 |         7,061 MB | 2,450 |
+| 03:26:36 | 114.35h |  1,973.4MB | +194.5 |         7,020 MB |   911 |
+| 03:28:41 | 114.38h |  1,973.8MB |   +0.4 |         6,891 MB | 1,280 |
+| 03:30:45 | 114.42h |  1,780.2MB | -193.6 |         6,885 MB | 2,506 |
+| 03:32:54 | 114.45h |  1,780.6MB |   +0.4 |         6,890 MB | 1,326 |
+| 03:34:58 | 114.49h |  1,760.9MB |  -19.7 |         6,886 MB | 1,967 |
+| 03:37:02 | 114.52h |  1,761.4MB |   +0.5 |         6,889 MB | 2,311 |
+| 03:38:07 | 114.54h |  1,781.2MB |  +19.8 |         6,888 MB | 1,992 |
+| 03:39:06 | 114.56h |  1,779.7MB |   -1.5 |         6,585 MB | 1,702 |
+| 03:41:11 | 114.59h |  1,780.1MB |   +0.4 |         6,426 MB | 1,828 |
+
+Net **-373.9 MB in 26 minutes, with no reboot, no intervention, and nothing
+asked of the machine.** The tag rises as well as falls: +194.5 MB in one step.
+Whatever holds this memory gives it back, on its own, within minutes.
+
+**Three things the series settles.**
+
+*One. `Vi54` is the paged pool's dynamics, essentially alone.* Over the same
+window the summed paged pool across every tag moved -357.0 MB while `Vi54` moved
+-373.9 MB. `Vi54` accounts for more than the whole of it; every other tag on the
+machine nets +16.9 MB between them. The next largest mover is `Vi12` at
+-20.9 MB, eighteen times smaller. When paged pool moves on this machine, it is
+`Vi54` moving.
+
+*Two. It does not track `vmmemWSL`.* Across the 26 minutes `vmmemWSL` private
+bytes moved 7,014 -> 6,426 MB, and its largest single step (-304 MB at 03:39)
+lands where `Vi54` is flat at 1,780. `Vi54`'s largest steps (-170.9, -145.4,
++194.5, -193.6) all land where `vmmemWSL` is flat within 47 MB. r = 0.524 over
+17 samples, which is not a relationship, and the step-alignment is the part that
+matters: the two quantities move at different times.
+
+*Three. The steps are quantised.* The values sit on plateaus and jump between
+them: 2,151 held for three samples, 1,973 for two, 1,780 for four. The jumps are
+54.6 / 170.9 / 145.4 / 194.5 / 193.6 / 19.7 / 19.8 MB. This is not a leak
+trickling upward. It is a small number of large blocks being allocated and
+released.
+
+**What is not settled, said plainly.** r(`Vi54`, `avail`) = -0.689 and I am not
+offering it. Seventeen samples taken two minutes apart inside one 26-minute
+episode are not seventeen independent observations -- this log has been caught on
+exactly that arithmetic before -- and the direction is unusable anyway: `avail`
+swings 48 -> 2,890 MB across the window, 2,842 MB, more than seven times `Vi54`'s
+entire 393 MB range. `Vi54` cannot be moving `avail`, so the correlation is
+either coincidence in a short episode or a third quantity moving both.
+
+**The standing warning, since this is the same driver twice.** On 2026-08-21
+this log fully retracted an attribution of 12,415 MB to the WSL2 VM (commit
+`a219530`), because `\Hyper-V VM Vid Partition\Physical Pages Allocated` reads
+the hot-add ceiling and not host-pinned pages. That counter was re-read tonight:
+3,174,400 pages = 12,400 MB, identical to ten days ago, confirming it is a
+constant. `Vi54` comes from a different instrument -- pool tag bytes via
+`NtQuerySystemInformation(SystemPoolTagInformation)` -- and unlike that counter
+it demonstrably moves. But it is the same driver, and the retraction's lesson was
+that a Vid number matching the size of the problem is not evidence about the
+problem.
+
+**One number that did change under the same instrument as before.** `vmmemWSL`
+private bytes, which the 08-21 retraction identified as the VM's real host cost,
+read ~1,512 MB then and 6,426-7,061 MB tonight. The VM's *presence* has been
+constant since `VirtualMachinePlatform` was enabled on 2026-03-25, five months
+before the slowdown -- that premise is verified and correct. Its *footprint* has
+not been constant.
+
+**Untestable from available data, so not used as an argument.** The System log
+retains only 8 boot events, back to 2026-07-18, showing uptime episodes of
+355.9 h and 582.7 h. Whether this machine was rebooted more often before the
+slowdown began cannot be answered from what the machine still holds.
+
+**Correction recorded.** "Vi54 is a grower" was an overstatement of a bound that
+only constrained two endpoints. The bound stands; the word does not.
+
