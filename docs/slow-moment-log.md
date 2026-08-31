@@ -5221,3 +5221,100 @@ slowdown began cannot be answered from what the machine still holds.
 **Correction recorded.** "Vi54 is a grower" was an overstatement of a bound that
 only constrained two endpoints. The bound stands; the word does not.
 
+
+## 2026-08-31 08:38 -- the machine stopped answering, and the one-minute sampler caught the 87 seconds before it
+
+The machine hard-froze this morning and was power-cycled by hand at 08:48:03.
+Kernel-Power 41: "the system has rebooted without cleanly shutting down first."
+No MEMORY.DMP and no minidump was written, so there is no post-mortem to read --
+the freeze was not a bugcheck, it was a machine that stopped answering.
+
+**The one-minute sampler had been registered seven minutes earlier, at 08:31:02,
+and it recorded three samples before it too stopped running.** Those three rows
+are the closest this investigation has come to watching the failure happen.
+
+| time     | uptime  | Vi54     | 4K GPA guest | vmmem     | avail    | commit    | procs |
+|----------|---------|---------:|-------------:|----------:|---------:|----------:|------:|
+| 08:30:22 | 119.41h | 2,043.9  |    3,190,796 | 12,217 MB | 4,578 MB | 71,137 MB |   500 |
+| 08:31:09 | 119.42h | 2,044.1  |    3,190,796 | 12,212 MB | 3,261 MB | 71,073 MB |   501 |
+| 08:31:49 | 119.43h | 2,044.0  |    3,190,796 | 12,212 MB | 2,095 MB | 72,448 MB |   524 |
+
+**Vi54 is flat across the collapse.** 2,043.9 -> 2,044.1 -> 2,044.0, a range of
+0.2 MB, while available memory fell 2,483 MB in 87 seconds. The tag that has
+dominated this log for a day did not move while the machine died. It is not the
+mechanism of the freeze.
+
+**What did move: 23 processes and 1,375 MB of commit, in 40 seconds.** procs
+501 -> 524 and commit 71,073 -> 72,448 MB between 08:31:09 and 08:31:49. Commit
+limit is 81,687 MB, so the last sample sits at 88.7% of it. What spawned those
+23 processes is not recoverable -- the sampler records a count, not an
+inventory, which is the gap this event exposes.
+
+**Then the machine ran out of the ability to start threads.** At 08:33:43
+pwsh.exe died with
+
+    System.Threading.SynchronizationLockException: Object synchronization method
+    was called from an unsynchronized block of code.
+       at System.Threading.Thread.StartCore()
+       at System.Threading.PortableThreadPool.WorkerThread.MaybeAddWorkingWorker
+
+That is the .NET thread pool failing while trying to add a worker thread. It is
+a consequence of exhaustion, not a cause of it. At 08:37:46 the Service Control
+Manager timed out after 30,000 ms waiting on CloudflareWARP, and the Windows
+Search filter host was force-terminated for not responding. The last event
+written to any log is 08:38:12. The machine was rebooted by hand 10 minutes
+later.
+
+**Do not trust event 6008.** It reports the last unexpected shutdown as
+08:16:05, which is contradicted by log entries at 08:31, 08:33, 08:37 and
+08:38:12. The 08:38 figure is the one backed by written records.
+
+**The sampler was starved out six minutes before the machine was.** It wrote at
+08:31:49 and never again, while the system log kept receiving entries until
+08:38:12. A scheduled task whose payload takes about one second could not be run
+for six minutes on a machine that was still logging. That is not a failure of
+the instrument, it is a measurement: Task Scheduler was already unable to make
+progress at 08:32.
+
+**My own instrument, named rather than buried.** The one-minute task was
+registered at 08:31:02 and the machine stopped logging at 08:38:12, seven
+minutes later. The two are close enough in time that the instrument has to be
+accounted for rather than assumed innocent. Its measured cost is three
+executions of roughly one second each, under 40 MB peak working set, writing
+about 200 bytes per row. Against 72,448 MB of commit, 524 processes, and an
+available-memory slope of 1,700 MB/minute, that is not a plausible cause -- but
+"not plausible" is the claim, not "ruled out", and the timing is recorded here
+so a later reader can weigh it instead of discovering it.
+
+**The pre-registered test has a first answer, and it is the unwanted one.**
+The test written into vi54-steps.ps1 before any second sample existed was: if
+4K GPA Pages sits flat across a Vi54 step, Vi54 is not a per-guest-page
+structure. Across the reboot:
+
+    before  08:31:49   Vi54 2,044.0 MB   4K GPA guest 3,190,796
+    after   08:51:00   Vi54    19.9 MB   4K GPA guest 3,190,796
+                       delta -2,024.1 MB              delta 0 pages
+
+Vi54 lost 99.0% of its value and 4K GPA Pages did not move by a single page --
+across a reboot, which also destroyed and recreated the guest partition. A
+reboot is not the within-session step the test was written for, and that
+weakness is stated rather than glossed: this is the largest possible Vi54 change
+rather than the kind the test anticipated. But 3,190,796 pages is 12,464 MB,
+which sits 64 MB above the 12,400 MB hot-add ceiling that
+`Vid Physical Pages Allocated` (3,174,400 pages) and
+`Initial Memory Assigned Per Node` (12,400 MB) both report.
+
+**That makes three constants, not one.** Every guest-memory number the Hyper-V
+counter surface exposes on this machine is ceiling-derived: 3,174,400 pages,
+3,190,796 pages, 12,400 MB. The 2026-08-21 retraction established that the first
+one is a ceiling. The instrument built this morning to find a live guest-page
+count has established that there is not one to find. That is a real answer to a
+real question and it closes a direction rather than opening one.
+
+**What the freeze does establish.** The failure is commit and process count, not
+pool. Commit reached 88.7% of its limit with a pagefile that has already grown
+itself to 49,689 MB on C:. Available memory fell 2,483 MB in 87 seconds while
+23 processes appeared. Vi54 held 2,044 MB throughout and never moved. Whatever
+2,044 MB of Vid paged pool costs this machine, it is a standing tax, not the
+event.
+

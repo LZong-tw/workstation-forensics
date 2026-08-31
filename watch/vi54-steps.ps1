@@ -162,6 +162,7 @@ try {
         '\Memory\Pool Nonpaged Bytes'
         '\Memory\Available MBytes'
         '\Memory\Committed Bytes'
+        '\Memory\Commit Limit'
         '\Memory\Modified Page List Bytes'
     )
     foreach ($s in (Get-Counter -Counter $paths -ErrorAction Stop).CounterSamples) {
@@ -210,7 +211,36 @@ try {
     if ($vm.Count -gt 0) { $vmmemMb = $vm.Sum / 1MB } else { $vmmemMb = $null }
 } catch { $vmmemMb = $null }
 
-try { $procs = (Get-Process -ErrorAction Stop).Count } catch { $procs = $null }
+# A COUNT IS NOT AN INVENTORY. On 2026-08-31 this sampler caught the 87 seconds
+# before the machine froze and recorded procs going 501 -> 524 with commit up
+# 1,375 MB in 40 seconds -- and could not say what the 23 new processes were,
+# because it stored only the count. The single most useful fact about that
+# window is the one column that was missing. top8 fixes it: the eight largest
+# private-bytes processes, name and MB, from the Get-Process call that was
+# already being made for the count.
+#
+# Names, not PIDs, and repeated names are collapsed with a count. Twenty
+# chrome.exe processes are one fact about chrome, not twenty rows of noise, and
+# a PID is useless in a series where every row is a different instant.
+$procs = $null
+$top8 = $null
+try {
+    $all = Get-Process -ErrorAction Stop
+    $procs = $all.Count
+    $top8 = (
+        $all | Group-Object ProcessName | ForEach-Object {
+            $mb = ($_.Group | Measure-Object -Property PrivateMemorySize64 -Sum).Sum / 1MB
+            [pscustomobject]@{ n = $_.Name; c = $_.Count; mb = $mb }
+        } | Sort-Object mb -Descending | Select-Object -First 8 | ForEach-Object {
+            if ($_.c -gt 1) { '{0}x{1}:{2:F0}' -f $_.n, $_.c, $_.mb }
+            else { '{0}:{1:F0}' -f $_.n, $_.mb }
+        }
+    ) -join ' '
+} catch { $procs = $null; $top8 = $null }
+# Process names cannot normally contain a comma, and top8 is the last field on
+# the line, so one would add a phantom column rather than misalign the others.
+# Stripped anyway: a CSV that parses is worth more than the character.
+if ($top8) { $top8 = $top8 -replace ',', '' }
 
 try {
     $upH = ((Get-Date) - (Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime).TotalHours
@@ -240,10 +270,12 @@ $row = [ordered]@{
     vmmem_mb      = (Fmt $vmmemMb)
     avail_mb      = (Fmt (MemC 'available mbytes'))
     commit_mb     = (Fmt $(if ($null -ne (MemC 'committed bytes')) { (MemC 'committed bytes') / 1MB }))
+    commit_lim_mb = (Fmt $(if ($null -ne (MemC 'commit limit')) { (MemC 'commit limit') / 1MB }))
     modified_mb   = (Fmt $(if ($null -ne (MemC 'modified page list bytes')) { (MemC 'modified page list bytes') / 1MB }))
     procs         = (Fmt $procs)
     poolstatus    = ('0x{0:x8}' -f $status)
     tags          = (Fmt $count)
+    top8          = $(if ($top8) { $top8 } else { 'na' })
 }
 
 $csv = Join-Path $DataDir $CsvName
