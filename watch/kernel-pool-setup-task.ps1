@@ -96,7 +96,7 @@ $t = Get-ScheduledTask -TaskName $TaskName
 Write-Host "Registered.  RunLevel = $($t.Principal.RunLevel)   State = $($t.State)" -ForegroundColor Green
 Write-Host "   action   : wscript -> $LauncherVbs (no console flash)"
 Write-Host "   interval : every $IntervalMinutes minutes, plus at logon"
-Write-Host "   logging  : $(Join-Path $DataDir 'kernel-pool.csv')"
+Write-Host "   logging  : $DataDir (CSV name is the sampler's own default)"
 Write-Host ''
 Write-Host 'Take the first sample now without waiting:'
 Write-Host "   Start-ScheduledTask -TaskName `"$TaskName`""
