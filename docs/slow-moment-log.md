@@ -5390,3 +5390,110 @@ constrains every earlier entry that read a falling avail as the slowdown itself
 alongside 46,921 hard page reads/sec. The hard-fault rate may be the quantity
 that matters; avail alone demonstrably is not.
 
+
+## 2026-08-31 -- what happened before the forced power-off, from two NTFS channels that survive a hard stop
+
+The one-minute sampler stopped at 08:31:49 and the machine stopped logging at
+08:38:12, leaving six minutes unobserved. Those six minutes turn out to be
+recorded, in `Microsoft-Windows-Ntfs/Operational`, which no earlier entry in
+this log had looked at.
+
+### Event 147: sixty-four paging reads took between 30 and 84 seconds
+
+| | |
+|---|---|
+| window | 08:37 (31 events) and 08:38 (33 events) |
+| latency | min 30,735 ms, median 69,688 ms, p90 81,086 ms, max 84,031 ms |
+| IO type | every one `Read: Paging, NonCached, Sync` |
+| IO size | 4 KB to 52 KB |
+| device | WD PC SN5000S, NVMe, disk 1, boot and system volume C: |
+
+Twenty-two distinct processes were blocked: pwsh.exe (22 events), Akiflow.exe
+(10), svchost.exe (5), MsMpEng.exe (4), Registry (3), and one or two each for
+bash.exe, chrome.exe, comet.exe, claude.exe, Slack.exe, explorer.exe, git.exe,
+uv.exe, Termius.exe, pCloud.exe, Rize.exe, remoting_host, PowerToys, and
+AsusSoftwareManager.
+
+Three of those events are the `Registry` process reading
+`\Windows\System32\config\SOFTWARE`, taking 36.5 and 37.6 seconds for single
+4 KB reads. When the registry hive itself is 37 seconds from a 4 KB page-in,
+nothing on the machine can make progress. That is what "the machine stopped
+answering" was.
+
+**The device reported nothing wrong.** No event 129 (device reset), no 153
+storage retry, no stornvme or storahci controller error, at any point. The IOs
+were not failed and retried; they completed, slowly. Both physical disks report
+HealthStatus Healthy. Reliability counters (temperature, wear, read errors) are
+unreadable without elevation and are recorded as unreadable, not as good.
+
+**Hypothesis, not conclusion:** 30-to-84-second completions with no device error
+look like queue depth rather than device failure -- a paging read waiting behind
+thousands of others while free memory is near zero and every fault must first
+evict a page. The measurement that would settle it is the pagefile read rate
+during those two minutes, and that is exactly what was lost when the sampler
+stopped at 08:31:49. It is not decidable from what survives.
+
+### This is episodic, four times in five months -- it is not the chronic slowdown
+
+Event 147 is rare. The log holds 172 of them since 2026-03-30:
+
+| date | n | span | median latency | max |
+|---|---:|---|---:|---:|
+| 05-19 | 64 | 18:30-18:48 | 131,336 ms | 230,304 ms |
+| 05-26 | 21 | 01:34-01:40 |  90,190 ms | 114,618 ms |
+| 08-10 | 15 | 17:24-17:24 |  30,994 ms |  31,228 ms |
+| 08-31 | 65 | 08:37-08:38 |  69,688 ms |  84,031 ms |
+
+Four bursts, each a few minutes long, with nothing in between. Whatever produces
+a three-week gradual slowdown, this is not it. This is the acute failure, and it
+should not be merged with the chronic one.
+
+### Event 142: five months of hourly pagefile size, which nobody had looked at
+
+The same channel writes a disk-space summary roughly every hour, and it includes
+the pagefile size on that volume. 3,879 of them survive, back to 2026-03-25.
+That is the longest continuous series this investigation has, and it came free.
+
+C: pagefile size, daily median:
+
+    03-25 to 04-01    5 - 13 GB
+    04-03 to 05-01   88 - 96 GB
+    05-02 to 08-07   34 - 58 GB      (fluctuating, no sustained ceiling)
+    08-08            76.76 -> 96.02 GB
+    08-09 to 08-25   89.34 GB        seventeen consecutive days, unchanged
+    08-26            46.02 GB        (the 519-hour reboot)
+    08-27 to 08-31   46 - 52 GB
+
+**96.02 GB is not an arbitrary number. It is the cap:** a system-managed
+pagefile is limited to three times physical RAM, and 3 x 31,997 MB is 96.02 GB
+exactly. The pagefile did not merely grow on 08-08, it hit the ceiling Windows
+allows. The same ceiling was reached on 04-03, through most of April, and on
+06-18.
+
+**08-08 is three weeks and two days before today**, which is when the machine
+was reported as having started to feel slow. That is a date-stamped coincidence
+worth having and it is not proof of anything.
+
+**Two things this series does NOT say, stated because the shape invites both.**
+
+*It does not say the machine was under pressure for seventeen days.* Windows
+grows a pagefile on demand and essentially never shrinks it while running. A
+value pinned at 89.34 GB for seventeen days is consistent with one event on
+08-08 that was never given back, and is equally consistent with daily pressure.
+The constancy carries no information about the days after the first -- this log
+has already been burned once by reading a pinned counter as a measurement rather
+than as a ceiling.
+
+*It is not a measure of memory in use.* Pagefile allocated size is a high-water
+mark of commit demand, and a response to it, not a cause and not current usage.
+At 08:14 today, with 47 GB allocated, current usage was 15,526 MB. Right now, at
+46.02 GB allocated, it is 1,921 MB.
+
+### What is now established about the freeze
+
+The machine did not crash. It became unable to complete 4 KB page-ins from its
+boot NVMe in less than half a minute, for at least two minutes, across every
+process including the registry. The storage stack reported no error. The
+mechanism between "low memory" and "84-second page-in" is not established, and
+the instrument that would have shown it had already been starved out.
+
