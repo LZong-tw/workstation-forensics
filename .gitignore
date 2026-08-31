@@ -29,3 +29,6 @@ task-*.vbs
 # committing it.
 watch/lib/
 
+# Rotated data files: the samplers rename to <name>.csv.<stamp>.bak when the
+# column set changes, and *.csv does not match that.
+*.csv.*.bak
