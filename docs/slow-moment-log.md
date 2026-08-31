@@ -5318,3 +5318,75 @@ itself to 49,689 MB on C:. Available memory fell 2,483 MB in 87 seconds while
 2,044 MB of Vid paged pool costs this machine, it is a standing tax, not the
 event.
 
+
+## 2026-08-31 09:22 -- hns and winnat were restarted, the machine felt better, and available memory fell 7.9 GB across the same window
+
+The user reported the machine felt smoother after restarting what they described
+as the winsock services. The commands were:
+
+    Stop-Service hns -ErrorAction SilentlyContinue
+    Stop-Service winnat -ErrorAction SilentlyContinue
+    Start-Service winnat -ErrorAction SilentlyContinue
+
+Not Winsock -- HNS (Host Network Service) and WinNAT, the Hyper-V and WSL2
+virtual networking layer. Note that hns is stopped and never explicitly
+restarted; it is Manual/trigger-start and was found Running again later.
+
+**The timestamp is exact.** The Windows Firewall operational log records six
+"Hyper-V Port deleted" events at 09:22:24, which is HNS tearing down the virtual
+switch ports. The last Hyper-V-VmSwitch event 291 before a 40-minute silence is
+also at 09:22.
+
+**The one-minute sampler was running across it and shows no improvement. It
+shows the opposite.**
+
+| time     | avail     | commit    | procs | Vi54    |
+|----------|----------:|----------:|------:|--------:|
+| 09:18:58 | 11,258 MB | 33,064 MB |   484 | 38.8 MB |
+| 09:21:03 | 10,532 MB | 33,893 MB |   475 | 43.1 MB |
+| 09:22:55 |  9,343 MB | 34,677 MB |   488 | 44.8 MB |
+| 09:24:26 |  7,394 MB | 36,580 MB |   531 | 45.8 MB |
+| 09:25:49 |  5,784 MB | 36,114 MB |   496 | 45.0 MB |
+| 09:27:49 |  4,016 MB | 35,257 MB |   485 | 43.0 MB |
+| 09:29:49 |  3,335 MB | 35,511 MB |   484 | 43.5 MB |
+
+Available memory fell 7,923 MB, monotonically, straight through 09:22:24, while
+the machine was reported as feeling better. Commit rose. Nothing stepped at the
+service restart.
+
+**Two candidate mechanisms were tested and one is falsified.**
+
+*Ephemeral port exhaustion, falsified.* This is the well-known WSL2/NAT failure
+where the dynamic port pool empties and every new outbound connection stalls,
+which would feel exactly like general slowness and would be cleared by
+restarting winnat. The dynamic range is 1024-14999, 13,977 ports. The machine
+holds 412 TCP connections total -- 144 Established, 136 Bound, 74 TimeWait, 43
+Listen -- and 15 ephemeral ports at or above 49152. No Tcpip provider event of
+any kind was logged today, port-exhaustion events included. The pool is nowhere
+near empty. `Get-NetNat` and `Get-NetNatSession` both return "class invalid",
+which is an unreadable result and not a count of zero.
+
+*A wedged WSL virtual NIC, not tested and not testable retrospectively.* HNS
+deleting six Hyper-V ports does reset the WSL vSwitch. If localhost or WSL-bound
+connections were stalling, every application that talks to a WSL service would
+recover at once, and no memory counter would record it. There is no positive
+evidence for this and no instrument here that would have captured it. It is
+recorded as unresolved, not as the explanation.
+
+**The confound, stated plainly.** At 09:22 the machine had been up 34 minutes,
+after a hard freeze and a power cycle. Commit was 43.8% of limit against 88.7%
+before the freeze, Vi54 was 44.8 MB against 2,044.0 MB, and the total paged pool
+was 1,181 MB against 3,966 MB. The machine was already in its best state of the
+day when the services were restarted. "Better than what" has no fixed referent
+here.
+
+**The finding worth keeping is the dissociation itself.** This investigation has
+been treating Available MBytes as the proxy for how the machine feels. Across
+this window the two moved in opposite directions: 7.9 GB of available memory
+disappeared while responsiveness was reported as improving. Whatever the
+subjective symptom tracks, in this range it is not available memory. That
+constrains every earlier entry that read a falling avail as the slowdown itself
+-- including the 02:12 entry, where avail bottoming at 504 MB was recorded
+alongside 46,921 hard page reads/sec. The hard-fault rate may be the quantity
+that matters; avail alone demonstrably is not.
+
