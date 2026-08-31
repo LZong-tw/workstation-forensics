@@ -59,13 +59,32 @@
 #
 # FAILED QUERIES ARE 'na', NEVER 0.
 #
-# COST. Two Get-Counter calls plus one NtQuerySystemInformation snapshot,
-# roughly 1 s wall clock, no disk writes beyond one CSV line of about 200 bytes.
-# At one-minute sampling the CSV grows about 290 KB/day. This matters here: an
-# earlier attempt to answer the same question with wpr -start Pool produced a
-# 13,228 MB trace, dropped 192,160,703 events, and left the machine under test
-# at 712 MB available -- an instrument that damages the system more than the
-# effect it measures is not an instrument.
+# COST, MEASURED RATHER THAN ASSERTED. This header first claimed "roughly 1 s
+# wall clock". That was a guess and it was wrong by a factor of eight. Timed:
+#
+#   powershell.exe -NoProfile startup      1.08 s
+#   Add-Type (C# compile, every run)       1.05 s
+#   Get-Counter memory group               2.50 s   (first PDH call pays init)
+#   Get-Counter rate group, 2 samples      2.08 s
+#   Get-Counter Hyper-V group              1.04 s
+#   Get-Process + grouping                 0.21 s
+#   NtQuerySystemInformation + decode      0.07 s
+#
+# The actual measurement -- 4,245 pool tags read and summed -- is 0.07 s. All of
+# the rest is the cost of asking. Two things were removed once that was visible:
+# a redundant '\Hyper-V Hypervisor\*' wildcard call whose two values were already
+# in the explicit list (1.04 s for nothing), and a Win32_OperatingSystem query
+# for uptime that [Environment]::TickCount64 answers for free (0.41 s).
+#
+# End to end now 5.9-6.1 s over three timed runs, about 10% duty cycle at
+# one-minute sampling, one thread of sixteen. The CSV grows about 400 KB/day.
+#
+# That is not free and it is written down so the next reader can weigh it. The
+# reason to keep paying it: an earlier attempt to answer the same question with
+# wpr -start Pool produced a 13,228 MB trace, dropped 192,160,703 events, and
+# left the machine under test at 712 MB available. An instrument that damages
+# the system more than the effect it measures is not an instrument -- but an
+# instrument whose cost is unmeasured is not one either.
 #
 # Read-only. Nothing here changes settings, restarts services, edits the
 # registry, or kills processes.
@@ -171,6 +190,47 @@ try {
 } catch { $mem = @{} }
 function MemC { param([string]$n) if ($mem.ContainsKey($n)) { $mem[$n] } else { $null } }
 
+# ------------------------------------------------------------- fault activity --
+# ADDED 2026-08-31 10:0x, because Available MBytes was caught not tracking the
+# symptom. Between 09:18 and 09:29 available memory fell 7,923 MB monotonically
+# while the machine was reported as feeling better. Whatever the slowdown is, in
+# that range it is not the available-memory level -- but the 02:12 live episode
+# recorded 46,921 hard page reads/sec alongside avail bottoming at 504 MB, so
+# the fault rate is the candidate that avail failed to be.
+#
+# SEPARATE CALL WITH TWO SAMPLES. Rate and inverse-time counters need two raw
+# samples to cook. The memory group above is instantaneous and one sample is
+# correct for it; these are not, and mixing them into that call would have
+# produced plausible-looking numbers computed from a single reading. Costs one
+# extra second per sample, once a minute.
+#
+# BOTH pgin_s AND pgread_s, deliberately. Pages Input/sec counts pages, Page
+# Reads/sec counts the disk operations that carried them, so pgin_s >= pgread_s
+# must hold in every row and the ratio is pages per read. That invariant is the
+# check on a mistake this log has already made -- quoting a numerator and a
+# denominator sampled in different windows -- and it is only checkable when both
+# come from the same instant.
+#
+# disk_read_ms AND disk_idle_pct BESIDE THEM for the same reason. The 02:12
+# entry recorded 46,921 page reads/sec against a disk 98.2% idle at 0.39 ms per
+# read, which cannot all be true of one interval. Sampling the four together is
+# what makes that contradiction decidable instead of arguable.
+$rate = @{}
+try {
+    $ratePaths = @(
+        '\Memory\Pages Input/sec'
+        '\Memory\Page Reads/sec'
+        '\Memory\Page Faults/sec'
+        '\Memory\Transition Faults/sec'
+        '\PhysicalDisk(_Total)\Avg. Disk sec/Read'
+        '\PhysicalDisk(_Total)\% Idle Time'
+        '\System\Processor Queue Length'
+    )
+    $s2 = Get-Counter -Counter $ratePaths -MaxSamples 2 -SampleInterval 1 -ErrorAction Stop
+    foreach ($s in $s2[-1].CounterSamples) { $rate[$s.Path.Split('\')[-1]] = $s.CookedValue }
+} catch { $rate = @{} }
+function RateC { param([string]$n) if ($rate.ContainsKey($n)) { $rate[$n] } else { $null } }
+
 # ------------------------------------------------------------------ hypervisor --
 # The guest partition instance is named by GUID and suffixed :hvpt. It is
 # selected by exclusion rather than by GUID: a WSL restart mints a new GUID, and
@@ -198,9 +258,7 @@ try {
         elseif ($s.Path -like '*Vid Partition*') { $hv["vid:$leaf"] = $s.CookedValue }
         else { $hv["hv:$leaf"] = $s.CookedValue }
     }
-    foreach ($s in (Get-Counter -Counter '\Hyper-V Hypervisor\*' -ErrorAction Stop).CounterSamples) {
-        $hv['hv:' + $s.Path.Split('\')[-1]] = $s.CookedValue
-    }
+
 } catch { $hv = @{} }
 function HvC { param([string]$n) if ($hv.ContainsKey($n)) { $hv[$n] } else { $null } }
 
@@ -242,9 +300,10 @@ try {
 # Stripped anyway: a CSV that parses is worth more than the character.
 if ($top8) { $top8 = $top8 -replace ',', '' }
 
-try {
-    $upH = ((Get-Date) - (Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime).TotalHours
-} catch { $upH = $null }
+# TickCount64 rather than Win32_OperatingSystem.LastBootUpTime: same number,
+# 0.41 s cheaper, and it does not need WMI to be answering. WMI was not
+# answering during the 08:27 window today.
+try { $upH = [Environment]::TickCount64 / 3600000 } catch { $upH = $null }
 
 # ------------------------------------------------------------------------ row --
 $row = [ordered]@{
@@ -272,6 +331,13 @@ $row = [ordered]@{
     commit_mb     = (Fmt $(if ($null -ne (MemC 'committed bytes')) { (MemC 'committed bytes') / 1MB }))
     commit_lim_mb = (Fmt $(if ($null -ne (MemC 'commit limit')) { (MemC 'commit limit') / 1MB }))
     modified_mb   = (Fmt $(if ($null -ne (MemC 'modified page list bytes')) { (MemC 'modified page list bytes') / 1MB }))
+    pgin_s        = (Fmt (RateC 'pages input/sec') 1)
+    pgread_s      = (Fmt (RateC 'page reads/sec') 1)
+    pgfault_s     = (Fmt (RateC 'page faults/sec') 1)
+    trans_s       = (Fmt (RateC 'transition faults/sec') 1)
+    disk_read_ms  = (Fmt $(if ($null -ne (RateC 'avg. disk sec/read')) { (RateC 'avg. disk sec/read') * 1000 }) 3)
+    disk_idle_pct = (Fmt (RateC '% idle time') 1)
+    cpu_queue     = (Fmt (RateC 'processor queue length'))
     procs         = (Fmt $procs)
     poolstatus    = ('0x{0:x8}' -f $status)
     tags          = (Fmt $count)
