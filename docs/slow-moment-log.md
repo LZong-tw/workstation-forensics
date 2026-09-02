@@ -5601,3 +5601,54 @@ size.
 Two node processes have dead parents -- a serena http-singleton at 33 MB and a
 ccstatusline at 4 MB. Orphaned, small, noted rather than pursued.
 
+
+## 2026-09-02 -- the tsserver that outlived Cursor is not a leak, and the test that says so is not "is the parent dead"
+
+Cursor is closed and a 1,196 MB `tsserver.js` running from
+`AppData\Local\cursor-agent\...\node.exe` is still alive. The obvious reading is
+that Cursor failed to clean up. It is the wrong reading, and the reason is
+recorded in a note from 2026-08-16 that this log had not applied.
+
+`serena-http-singleton.mjs` spawns its daemon with `detached: true` + `unref()`.
+**Every healthy generation therefore has a dead root.** A dead parent is the
+normal state of this process, not evidence of abandonment. The correct test is
+*who is the ancestor of the process holding the listening socket*.
+
+Applying it:
+
+    port 9127 LISTEN  ->  pid 58832 python  ->  ... ->  pid 39192 node
+                                                        (serena-http-singleton,
+                                                         started 08-31 08:56,
+                                                         parent 39356 gone)
+
+The tree that holds the listener is this one. It is the current generation, not
+a stray. And it is in use: two ESTABLISHED client connections on 9127 right now,
+both from pid 73576, `mcp-remote/dist/proxy.js`, which belongs to a live
+`claude.exe --resume 1816bf5d` running in an open Windows Terminal.
+
+**So Cursor did release everything that was Cursor's.** What survived is a shared
+daemon designed to outlive whoever starts it, and something else is talking to
+it. There is exactly one generation alive, which is the observable that matters:
+on 2026-08-16 this same project and port carried three simultaneous generations,
+27 processes, 572 MB and 113.5 CPU hours. The `reap` added then is holding.
+
+**What it costs, which is a separate question from whether it is a leak:**
+
+    13 processes, 3,393 MB private, 5,672 CPU seconds
+      pid 58832 python  1,771 MB    628 s   (the MCP server, holds the socket)
+      pid 46932 node    1,196 MB  4,896 s   (tsserver on c:\dev\sugar-dating)
+      the other 11               < 170 MB each
+
+The tree below the daemon started 09-01 09:40, so 4,896 CPU seconds is 81.6
+minutes of CPU in about 25 hours by one tsserver.
+
+**And there is a second one.** `c:\dev\sugar-dating` also has a 2,411 MB
+`tsserver.js` under the live Claude Code session's own
+`typescript-language-server`, started today at 10:12. Two TypeScript servers
+indexing one project from two owners, 3,607 MB between them.
+
+**Processes whose parent is dead but which are not leaks**, checked so the same
+mistake is not made twice: LINE 1,108 MB, Dropbox 504 MB, explorer 378 MB,
+OneDrive.Sync.Service 139 MB, Rize 130 MB. Launcher-exits-after-spawn is the
+ordinary Windows pattern and explorer.exe has a dead parent by construction.
+
