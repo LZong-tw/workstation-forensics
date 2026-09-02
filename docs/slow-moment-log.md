@@ -5497,3 +5497,107 @@ process including the registry. The storage stack reported no error. The
 mechanism between "low memory" and "84-second page-in" is not established, and
 the instrument that would have shown it had already been starved out.
 
+
+## 2026-09-02 -- 49.5 hours of one-minute sampling: the test is settled, and "nothing happened" is not what the data says
+
+2,809 samples, 98% coverage, four gaps of 6-8 minutes, no reboot since
+2026-08-31 08:48:03.
+
+### The pre-registered test is settled, by data collected after it was written
+
+The test in `vi54-steps.ps1` said: if 4K GPA Pages sits flat across a Vi54 step,
+Vi54 is not a per-guest-page structure.
+
+    gpa4k_guest = 3,190,796   in 2,809 of 2,809 samples, zero exceptions
+    vid_pages   = 3,174,400   in 2,809 of 2,809 samples, zero exceptions
+    Vi54                       38.9 MB to 885.4 MB over the same rows, 22x
+
+Vi54 moved by a factor of twenty-two and neither Hyper-V guest-page counter
+changed by a single page in 49.5 hours. **Vi54 is not sized by guest physical
+pages.** Both counters are constants, joining `Initial Memory Assigned Per Node`
+= 12,400 MB. The Hyper-V counter surface on this machine exposes no live
+guest-page number, which is now demonstrated rather than suspected.
+
+**And the ceiling has a source.** `.wslconfig` contains
+`memory=13002342400`, which is 12,400 MB exactly. The 12,400 MB that
+`Vid Physical Pages Allocated`, `Initial Memory Assigned Per Node` and the guest
+dmesg all report is a value the user configured, not a default -- the WSL2
+default would be 50% of RAM, 15,998 MB.
+
+### Vi54 keeps climbing with uptime
+
+    uptime  1.6 h    68.2 MB
+    uptime 11   h   459.9 MB
+    uptime 25   h   549.4 MB
+    uptime 41   h   736.1 MB
+    uptime 49.5 h   869.4 MB
+
+Consistent with the 2,044 MB measured at 119 h before the freeze. It rises with
+uptime, it is not driven by guest memory, and what it is remains open.
+
+### The machine was not fine
+
+The user reported the last few days as uneventful. On the instruments:
+
+    lowest Available MBytes      107 MB   (09-01 03:42)
+    readings under 450 MB         10
+    peak commit                 85.3%     (09-01 02:26)
+    peak hard read rate      29,407/s     (09-01 15:25)
+
+At the single worst sample, 09-01 03:42:50, available memory was **107 MB** with
+commit at 65,471 of 79,101 MB. The eight largest processes by private bytes:
+
+    vmmemWSL 12,337   node x21 10,993   chrome x65 9,594   claude x4 4,150
+    comet x23 1,716   Rize x13 1,520    dwm 1,154          LINE 1,104
+
+Those eight sum to 42,568 MB against 31,997 MB of physical RAM. That is a commit
+figure and not a residency figure -- private bytes is what a process has
+committed, not what it holds in RAM -- but commit is the quantity that was at
+82.8% of its limit, and it is the quantity that ran out on 08-31.
+
+### The most useful thing in 49 hours is a negative
+
+**Zero event 147 in 48 hours, including at 107 MB available.** The 30-to-84
+second paging stalls that froze the machine on 08-31 did not recur, even though
+available memory went lower afterwards than the 2,095 MB recorded in the last
+sample before that freeze.
+
+So low available memory is **not sufficient** for the acute failure. Something
+else was present on 08-31 and absent on 09-01, and 107 MB versus 2,095 MB says
+it is not the depth of the shortage. Every hypothesis that explains the freeze
+by memory pressure alone is now constrained by this.
+
+### The standing load, named
+
+`vmmemWSL` private bytes over 49.5 hours: min 1,403, max 12,484, mean 9,562 MB.
+
+    at or above 12,000 MB   39.3% of the time
+    at or above  8,000 MB   69.6% of the time
+
+From 08-31 23:00 to 09-02 07:00 the hourly median sat between 12,0xx and
+12,4xx MB almost continuously -- 32 hours against a 12,400 MB ceiling. On
+2026-08-21 this same measurement read 1,512 MB, and the retraction of that date
+recorded it as the VM's real host cost at about 1.5 GB. **That figure is
+obsolete.** The retraction's actual finding -- that `Physical Pages Allocated`
+reads a ceiling -- is confirmed again here at 2,809 out of 2,809 samples. What
+changed is the footprint, not the counter semantics.
+
+The user's position that WSL predates the slowdown remains correct and is not
+disputed: `VirtualMachinePlatform` was enabled 2026-03-25. Presence is constant;
+footprint went up eightfold.
+
+### node, and two language servers on one project
+
+Nineteen node processes at the time of writing, but the size is in two:
+
+    2,532 MB   tsserver.js for c:\dev\sugar-dating   (nvm4w node)
+    1,123 MB   tsserver.js for c:\dev\sugar-dating   (cursor-agent node)
+
+Two TypeScript language servers indexing the same project from two different
+editors, each with its own typingsInstaller child. The sampler recorded
+node x21 at 13,167 MB on 09-01 06:18, so these grow well beyond their current
+size.
+
+Two node processes have dead parents -- a serena http-singleton at 33 MB and a
+ccstatusline at 4 MB. Orphaned, small, noted rather than pursued.
+
