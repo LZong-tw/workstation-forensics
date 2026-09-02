@@ -5652,3 +5652,98 @@ mistake is not made twice: LINE 1,108 MB, Dropbox 504 MB, explorer 378 MB,
 OneDrive.Sync.Service 139 MB, Rize 130 MB. Launcher-exits-after-spawn is the
 ordinary Windows pattern and explorer.exe has a dead parent by construction.
 
+
+## 2026-09-02 -- the OpenBLAS hypothesis was mine, and it was wrong; and private bytes are not RAM
+
+Two questions, one turn: why is the serena python 1,771 MB, and why is a Cursor
+binary running underneath Claude Code's tooling.
+
+### The falsified hypothesis
+
+One turn earlier I proposed that the 1,771 MB python was the same OpenBLAS thread
+arena I had recorded on another MCP server, where `OPENBLAS_NUM_THREADS=1` cut 90%.
+I even supplied the reason it would be invisible: that variable is set on the Claude
+Code launch path, and this daemon was started by Cursor, so it would not be inherited.
+
+The hypothesis is dead. Three independent measurements killed it:
+
+- The environment block of pid 58832, read unelevated via `NtQueryInformationProcess`
+  (PEB+0x20 -> RTL_USER_PROCESS_PARAMETERS, +0x80 Environment, +0x3F0 EnvironmentSize),
+  yields 98 variables and contains no OPENBLAS, OMP, MKL, NUMEXPR or VECLIB variable at
+  all. Neither does my own shell. The asymmetry I invoked does not exist.
+- Of the 85 modules loaded in that process, none is a BLAS, MKL, torch, onnxruntime,
+  tensorflow or LAPACK image, and no native module exceeds 8 MB.
+- A serena started an hour ago outside any Cursor environment (pid 26816) is already
+  1,488 MB with the same 5 threads. The size is what serena costs, not an artifact of
+  whose environment started it.
+
+Recorded because the shape of the error is worth more than the conclusion: I reached
+for a stored explanation that matched on magnitude and process type, and supplied a
+plausible mechanism for why the evidence would be missing before checking whether it
+was missing.
+
+### What the number actually is
+
+    pid 58832   private 1,780 MB   working set  90 MB   virtual 6,037 MB   5% resident
+    pid 26816   private 1,488 MB   working set   9 MB   virtual 5,725 MB   1% resident
+
+Between 95% and 99% of it is committed and not resident -- the same signature as the
+two SrTasks at 2,233 MB each on 08-31. These pages were touched once and never again;
+the memory manager trimmed them out to the pagefile.
+
+This invalidates the ranking method used in several earlier entries. `top8` in the
+sampler, and every process table above that sorted on `PrivateMemorySize64`, measures
+commit, not occupancy. Machine-wide:
+
+    all visible processes   private 42,796 MB   working set 22,073 MB   physical RAM 31,997 MB
+
+    name                 count   private MB   working set MB   resident
+    node                  x21        7,569           4,887       65%
+    chrome                x47        7,116           4,790       67%
+    comet                 x21        1,774           1,650       93%
+    vmmemWSL               x1        2,755           1,582       57%
+    claude                 x3        2,737           1,243       45%
+    Rize                  x13        1,788           1,188       66%
+    LINE                   x1        1,108             206       19%
+
+The 08-31 catalogue of dead-parent-but-normal processes listed LINE at 1,108 MB. Its
+RAM cost is 206 MB. The correction does not make the commit figures irrelevant --
+commit is precisely the quantity that ran out on 08-31, and the two serena instances
+hold 3,268 MB of it -- but occupancy and commit are different questions and the
+instrument only answers one of them.
+
+### Why cursor-agent's node is under Claude Code
+
+Verified in source, not inferred. `serena-http-singleton.mjs:599`:
+
+    const child = spawn(
+      process.execPath,
+      [SCRIPT_PATH, 'daemon', '--project', config.project, ...
+
+The daemon is spawned with `process.execPath` -- whichever node ran `ensure` first
+becomes the node for the entire tree. Line 950 does the same for `reap`. Line 727
+spawns the python side with `env: { ...process.env }`, so the uvx/serena/python chain
+inherits that environment too.
+
+The running daemon confirms it:
+
+    pid 39192  exe C:\Users\LZong\AppData\Local\cursor-agent\versions\2026.08.25-3e8eec8\node.exe
+    where.exe node -> C:\nvm4w\nodejs\node.exe
+
+cursor-agent's node is not on PATH, so PATH inheritance cannot be the mechanism.
+Cursor won the singleton race at 08-31 08:56, the daemon detached by design and
+survived Cursor's exit, and Claude Code's later `ensure` found a healthy daemon and
+connected to port 9127. Claude Code is not using Cursor's binary; it is using an HTTP
+port whose owner was decided days ago. Both stacks are visible side by side:
+
+    pid 39192 daemon     cursor-agent node      pid 94480 tsserver   cursor-agent node
+    pid 42172 bridge     nvm4w node             pid 49008 tsserver   nvm4w node
+
+One serena instance is five processes: uvx.exe -> uv.exe -> serena.exe -> python -> python.
+
+Consequence worth noting: the pinned path contains a version directory. When
+cursor-agent updates, that directory can be removed while a long-lived daemon still
+points at it; only a daemon restart re-reads `process.execPath`. This is the same
+mechanism as the already-recorded fact that unpinning serena requires a daemon
+restart to take effect, seen from the other side.
+
