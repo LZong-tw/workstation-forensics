@@ -273,32 +273,58 @@ try {
 # before the machine froze and recorded procs going 501 -> 524 with commit up
 # 1,375 MB in 40 seconds -- and could not say what the 23 new processes were,
 # because it stored only the count. The single most useful fact about that
-# window is the one column that was missing. top8 fixes it: the eight largest
-# private-bytes processes, name and MB, from the Get-Process call that was
-# already being made for the count.
+# window is the one column that was missing. topmem fixes it: the largest
+# processes by name and MB, from the Get-Process call that was already being
+# made for the count.
+#
+# PRIVATE BYTES ARE NOT RAM. Until 2026-09-02 this column ranked on
+# PrivateMemorySize64 alone and was read as though it answered "who is using the
+# memory". It does not. Private bytes are commit. A serena python measured
+# 1,780 MB private against a 90 MB working set -- 5% resident -- and LINE, which
+# an earlier entry catalogued at 1,108 MB, occupies 206 MB. Machine-wide the two
+# quantities differed by 20,723 MB on 31,997 MB of RAM.
+#
+# Both are kept because both questions are real: commit is the quantity that ran
+# out on 08-31, occupancy is what makes the machine swap. Each entry is
+# name:private/workingset, and the set is the union of the top 8 by private and
+# the top 8 by working set, so a process that is large in one and small in the
+# other cannot fall out of the row unseen.
 #
 # Names, not PIDs, and repeated names are collapsed with a count. Twenty
 # chrome.exe processes are one fact about chrome, not twenty rows of noise, and
 # a PID is useless in a series where every row is a different instant.
 $procs = $null
-$top8 = $null
+$topmem = $null
+$privMb = $null
+$wsMb = $null
 try {
     $all = Get-Process -ErrorAction Stop
     $procs = $all.Count
-    $top8 = (
-        $all | Group-Object ProcessName | ForEach-Object {
-            $mb = ($_.Group | Measure-Object -Property PrivateMemorySize64 -Sum).Sum / 1MB
-            [pscustomobject]@{ n = $_.Name; c = $_.Count; mb = $mb }
-        } | Sort-Object mb -Descending | Select-Object -First 8 | ForEach-Object {
-            if ($_.c -gt 1) { '{0}x{1}:{2:F0}' -f $_.n, $_.c, $_.mb }
-            else { '{0}:{1:F0}' -f $_.n, $_.mb }
+    $grouped = $all | Group-Object ProcessName | ForEach-Object {
+        [pscustomobject]@{
+            n  = $_.Name
+            c  = $_.Count
+            pv = ($_.Group | Measure-Object -Property PrivateMemorySize64 -Sum).Sum / 1MB
+            ws = ($_.Group | Measure-Object -Property WorkingSet64 -Sum).Sum / 1MB
         }
+    }
+    $privMb = ($grouped | Measure-Object -Property pv -Sum).Sum
+    $wsMb = ($grouped | Measure-Object -Property ws -Sum).Sum
+    $byPv = $grouped | Sort-Object pv -Descending | Select-Object -First 8
+    $byWs = $grouped | Sort-Object ws -Descending | Select-Object -First 8
+    $names = @($byPv.n) + @($byWs.n) | Select-Object -Unique
+    $topmem = (
+        $grouped | Where-Object { $names -contains $_.n } |
+            Sort-Object pv -Descending | ForEach-Object {
+                if ($_.c -gt 1) { '{0}x{1}:{2:F0}/{3:F0}' -f $_.n, $_.c, $_.pv, $_.ws }
+                else { '{0}:{1:F0}/{2:F0}' -f $_.n, $_.pv, $_.ws }
+            }
     ) -join ' '
-} catch { $procs = $null; $top8 = $null }
-# Process names cannot normally contain a comma, and top8 is the last field on
+} catch { $procs = $null; $topmem = $null; $privMb = $null; $wsMb = $null }
+# Process names cannot normally contain a comma, and topmem is the last field on
 # the line, so one would add a phantom column rather than misalign the others.
 # Stripped anyway: a CSV that parses is worth more than the character.
-if ($top8) { $top8 = $top8 -replace ',', '' }
+if ($topmem) { $topmem = $topmem -replace ',', '' }
 
 # TickCount64 rather than Win32_OperatingSystem.LastBootUpTime: same number,
 # 0.41 s cheaper, and it does not need WMI to be answering. WMI was not
@@ -339,9 +365,11 @@ $row = [ordered]@{
     disk_idle_pct = (Fmt (RateC '% idle time') 1)
     cpu_queue     = (Fmt (RateC 'processor queue length'))
     procs         = (Fmt $procs)
+    proc_priv_mb  = (Fmt $privMb)
+    proc_ws_mb    = (Fmt $wsMb)
     poolstatus    = ('0x{0:x8}' -f $status)
     tags          = (Fmt $count)
-    top8          = $(if ($top8) { $top8 } else { 'na' })
+    topmem        = $(if ($topmem) { $topmem } else { 'na' })
 }
 
 $csv = Join-Path $DataDir $CsvName
